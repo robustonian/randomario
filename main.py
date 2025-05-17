@@ -8,6 +8,8 @@ import time
 import sys
 import os
 from collections import deque
+import urllib.request # 画像ダウンロード用に追加
+import urllib.error   # エラーハンドリング用に追加
 
 # --- アクションセットの定義 ---
 ACTION_SET_COMPLEX = COMPLEX_MOVEMENT
@@ -183,7 +185,7 @@ BUTTON_GEOMETRIES_ORIG = {
 }
 
 # --- フィードバック機構のためのパラメータ (変更なし) ---
-MAX_SUCCESSFUL_SEQUENCES = 1
+# MAX_SUCCESSFUL_SEQUENCES = 1
 MIN_X_PROGRESS_FOR_SUCCESS = 10
 SHORT_TERM_FAILURE_MEMORY_SIZE = 0
 A_BUTTON_MAX_HOLD_TIME = 1.8
@@ -219,15 +221,53 @@ def init_pygame():
     global scaled_button_geometries, CONTROLLER_RECT, CONTROLLER_X, CONTROLLER_Y
     pygame.init()
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-    # pygame.display.set_caption は update_pygame_caption で動的に設定
     update_pygame_caption()
     clock = pygame.time.Clock()
     font_small = pygame.font.Font(None, 28)
     font_medium = pygame.font.Font(None, 36)
 
+    # --- コントローラー画像のダウンロード処理 ---
+    controller_image_url = 'https://stockmaterial.net/wp/wp-content/uploads/img/famicon01_01.png'
+    controller_image_dir = os.path.dirname(CONTROLLER_IMAGE_PATH) # 'fig'
+
     if not os.path.exists(CONTROLLER_IMAGE_PATH):
-        print(f"エラー: コントローラー画像が見つかりません: {CONTROLLER_IMAGE_PATH}")
-        pygame.quit(); sys.exit()
+        print(f"コントローラー画像 '{CONTROLLER_IMAGE_PATH}' が見つかりません。")
+        print(f"'{controller_image_url}' からダウンロードを試みます...")
+        
+        try:
+            # ディレクトリ 'fig' が存在しない場合は作成
+            if controller_image_dir and not os.path.exists(controller_image_dir):
+                os.makedirs(controller_image_dir)
+                print(f"ディレクトリ '{controller_image_dir}' を作成しました。")
+
+            # urllib.request を使ってダウンロード
+            urllib.request.urlretrieve(controller_image_url, CONTROLLER_IMAGE_PATH)
+            print(f"画像を '{CONTROLLER_IMAGE_PATH}' にダウンロードしました。")
+        except urllib.error.URLError as e:
+            print(f"エラー: 画像のダウンロードに失敗しました (URLエラー)。URLやネットワーク接続を確認してください: {e}")
+            print(f"URL: {controller_image_url}")
+            print("手動で画像をダウンロードして 'fig/famicon01_01.png' として保存してください。")
+            pygame.quit()
+            sys.exit()
+        except OSError as e:
+            print(f"エラー: 画像の保存に失敗しました (OSエラー)。ディレクトリの権限などを確認してください: {e}")
+            print(f"パス: {CONTROLLER_IMAGE_PATH}")
+            print("手動で画像をダウンロードして 'fig/famicon01_01.png' として保存してください。")
+            pygame.quit()
+            sys.exit()
+        except Exception as e: # その他の予期せぬエラー
+            print(f"エラー: 画像のダウンロード中に予期せぬエラーが発生しました: {e}")
+            print("手動で画像をダウンロードして 'fig/famicon01_01.png' として保存してください。")
+            pygame.quit()
+            sys.exit()
+
+    # --- 画像の読み込み (既存の処理の続き) ---
+    # ダウンロード試行後に再度ファイルの存在を確認
+    if not os.path.exists(CONTROLLER_IMAGE_PATH):
+        print(f"エラー: コントローラー画像 '{CONTROLLER_IMAGE_PATH}' がダウンロード後も見つかりません。処理を中断します。")
+        pygame.quit()
+        sys.exit()
+
     try:
         controller_base_image_orig = pygame.image.load(CONTROLLER_IMAGE_PATH).convert_alpha()
     except pygame.error as e:
