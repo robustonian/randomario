@@ -1,4 +1,4 @@
-# RamdoMario
+# RandoMario
 
 [![Python version](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 
@@ -6,7 +6,7 @@
 
 ## 概要
 
-RamdoMario は、OpenAI Gym のスーパーマリオブラザーズ環境 (`gym-super-mario-bros`) を使用して、マリオを自動でプレイさせることを目指すプロジェクトです。
+RandoMario は、OpenAI Gym のスーパーマリオブラザーズ環境 (`gym-super-mario-bros`) を使用して、マリオを自動でプレイさせることを目指すプロジェクトです。
 現在のバージョンでは、事前に定義されたアクションセットからランダムにアクションを選択してマリオを操作します。
 Pygame を利用して、実際のゲーム画面と、どのコントローラーボタンが押されているかを示す UI をリアルタイムで表示し、エージェントの動作確認や開発を支援します。
 
