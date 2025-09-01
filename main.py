@@ -91,7 +91,7 @@ STAGE_STRATEGIES = {
         ]
     },
     '4-4': {
-        'thresholds': [0, 915, 1050, 1450, 1550, 1675],
+        'thresholds': [0, 915, 1050, 1450, 1550, 1650], #1675],
         'actions': [
             ACTION_SET_RIGHT_ONLY,
             RIGHT_ONLY_NO_JUMP,
