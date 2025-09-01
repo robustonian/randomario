@@ -7,6 +7,7 @@ import random
 import time
 import sys
 import os
+import argparse  # コマンド引数解析用に追加
 from collections import deque
 import urllib.request # 画像ダウンロード用に追加
 import urllib.error   # エラーハンドリング用に追加
@@ -307,12 +308,13 @@ def init_pygame():
             scaled_radius = max(1, int(orig_radius * min(scale_x, scale_y)))
             scaled_button_geometries[key] = {'type': 'circle', 'geom': ((scaled_center_x, scaled_center_y), scaled_radius)}
 
-def init_mario_env():
+def init_mario_env(stage='1-1'):
     global INITIAL_ACTION_SET_FOR_ENV # ★★★ 初期化用のアクションセットを使用
+    env_name = f'SuperMarioBros-{stage}-v0'
     try:
-        env = gym_super_mario_bros.make('SuperMarioBros-1-1-v0', render_mode='rgb_array', apply_api_compatibility=True)
+        env = gym_super_mario_bros.make(env_name, render_mode='rgb_array', apply_api_compatibility=True)
     except Exception:
-        env = gym_super_mario_bros.make('SuperMarioBros-1-1-v0', render_mode='rgb_array')
+        env = gym_super_mario_bros.make(env_name, render_mode='rgb_array')
     env = JoypadSpace(env, INITIAL_ACTION_SET_FOR_ENV)
     return env
 
@@ -764,7 +766,16 @@ def game_loop(env):
     pygame.quit()
     sys.exit()
 
+def parse_arguments():
+    parser = argparse.ArgumentParser(description='RandoMario - Super Mario Bros. Random Action Agent')
+    parser.add_argument('--stage', '-s', type=str, default='1-1', 
+                       help='Stage to play (e.g., 1-1, 2-1, 3-1, 4-1, 8-4). Default: 1-1')
+    return parser.parse_args()
+
 if __name__ == '__main__':
+    args = parse_arguments()
+    print(f"Starting RandoMario on stage {args.stage}")
+    
     init_pygame()
-    mario_environment = init_mario_env()
+    mario_environment = init_mario_env(args.stage)
     game_loop(mario_environment)
