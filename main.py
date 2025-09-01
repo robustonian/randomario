@@ -188,6 +188,21 @@ A_BUTTON_MAX_HOLD_TIME = 1.8
 THRESHOLD_NORMAL = 60
 THRESHOLD_AFTER_FALL = 90
 
+# --- 探索強化のためのパラメータ（追加） ---
+X_BIN_SIZE = 20                 # Xをこの幅でビン分け
+EPSILON_GREEDY = 0.10           # ε-greedy確率
+UCB_C = 1.2                     # UCBの探索率
+DEATH_PENALTY = 20.0            # 死亡（特に落下）時の追加ペナルティ
+STALL_TIME_SEC = 2.0            # この秒数Xが伸びなければ「停滞」と見なす
+REPLAY_BACKOFF_X = 120          # ベストXからこのpx手前でリプレイを打ち切って探索開始
+BOOST_DECISIONS = 8             # ブーストモードで強気アクションを続ける決定回数
+BOOST_ACTION_SET = RIGHT_DASH_JUMP_ONLY  # ブースト時のアクション候補
+
+# --- バンディット学習用（追加） ---
+bandit_stats = {}   # {bin:int -> {action_idx:int -> {'n':int,'sum':float}}}
+last_decision_record = None  # {'bin':int,'action':int,'x':float}
+episodes_without_improvement = 0
+
 # --- グローバル変数 (変更なし/追加あり) ---
 screen = None
 clock = None
@@ -302,6 +317,54 @@ def init_pygame():
             scaled_center_y = orig_center[1] * scale_y
             scaled_radius = max(1, int(orig_radius * min(scale_x, scale_y)))
             scaled_button_geometries[key] = {'type': 'circle', 'geom': ((scaled_center_x, scaled_center_y), scaled_radius)}
+
+def get_x_bin(x):
+    try:
+        return int(x) // X_BIN_SIZE
+    except Exception:
+        return 0
+
+def choose_action_with_bandit(bin_id, candidate_indices):
+    # ε-greedy
+    if candidate_indices and random.random() < EPSILON_GREEDY:
+        return random.choice(candidate_indices)
+
+    stats = bandit_stats.setdefault(bin_id, {})
+    total_n = sum(d['n'] for d in stats.values()) + 1
+
+    # 未試行のアクションがあれば優先
+    untried = [i for i in candidate_indices if stats.get(i, {'n':0})['n'] == 0]
+    if untried:
+        return random.choice(untried)
+
+    # UCB1
+    best_i, best_score = None, -1e9
+    for i in candidate_indices:
+        d = stats.setdefault(i, {'n':0, 'sum':0.0})
+        mean = d['sum'] / max(1, d['n'])
+        ucb = mean + UCB_C * np.sqrt(np.log(total_n) / max(1, d['n']))
+        if ucb > best_score:
+            best_score = ucb
+            best_i = i
+    return best_i if best_i is not None else (random.choice(candidate_indices) if candidate_indices else 0)
+
+def update_bandit_from_transition(prev_decision, curr_x, done, info):
+    # 直前の決定に対し、現在Xとの差分を報酬として更新
+    if not prev_decision:
+        return
+    b = prev_decision['bin']; a = prev_decision['action']; x0 = prev_decision['x']
+    delta = float(curr_x - x0)
+    reward = delta
+
+    if done and not info.get('flag_get', False):
+        # 死亡時に追加ペナルティ（落下死は大きめ）
+        y = info.get('y_pos', 0); ps = info.get('player_state', 0)
+        is_fall = (y >= 250) or (ps == 0x0b)
+        reward -= (DEATH_PENALTY if is_fall else DEATH_PENALTY * 0.5)
+
+    d = bandit_stats.setdefault(b, {}).setdefault(a, {'n':0, 'sum':0.0})
+    d['n'] += 1
+    d['sum'] += reward
 
 def init_mario_env(stage='1-1'):
     global INITIAL_ACTION_SET_FOR_ENV # ★★★ 初期化用のアクションセットを使用
@@ -467,6 +530,22 @@ def game_loop(env):
         if successful_sequences:
             print(f"  DEBUG Ep Start: successful_sequences[0]['max_x']: {successful_sequences[0]['max_x']}, len: {len(successful_sequences[0]['sequence_with_x'])}")
 
+        # --- 追加: バンディットと停滞検出 ---
+        global last_decision_record, episodes_without_improvement
+        last_decision_record = None
+        last_progress_time = time.time()
+        last_progress_x = info.get('x_pos', 40)
+        boost_mode_remaining = 0
+
+        # --- 追加: X座標でリプレイ打ち切り位置を決める ---
+        apply_replay_cut_by_x = False
+        replay_stop_at_x = -1
+        if successful_sequences:
+            best_seq_data = successful_sequences[0]
+            # ベストXの少し手前から探索に入る
+            replay_stop_at_x = max(0, int(best_seq_data.get('max_x', 0)) - REPLAY_BACKOFF_X)
+            apply_replay_cut_by_x = True
+
 
         apply_special_replay_exit_this_ep = False
         target_x_for_special_replay_exit = -1
@@ -562,6 +641,13 @@ def game_loop(env):
                 update_pygame_caption()
 
 
+            if is_replaying_sequence and apply_replay_cut_by_x:
+                if current_x_pos_before_action >= replay_stop_at_x:
+                    print(f"DEBUG Replay Cut by X: Current X ({current_x_pos_before_action}) >= Stop X ({replay_stop_at_x}). Switching to EXPLORE.")
+                    is_replaying_sequence = False
+                    last_action_choice_time = time.time() - ACTION_INTERVAL - 0.01
+                    action_idx_for_this_frame = -1
+
             if is_replaying_sequence and apply_special_replay_exit_this_ep:
                 if current_x_pos_before_action >= target_x_for_special_replay_exit:
                     print(f"DEBUG Replay Pre-Check: Current X ({current_x_pos_before_action}) >= Target X ({target_x_for_special_replay_exit}). Switching to EXPLORE.")
@@ -584,33 +670,43 @@ def game_loop(env):
                 if time_since_last_choice > ACTION_INTERVAL or action_idx_for_this_frame == -1:
                     last_action_choice_time = time.time()
                     
+                    # 候補（現在のサブセット ∩ COMPLEXインデックス）
                     current_allowed_action_list = ALLOWED_ACTIONS_SUBSETS_BY_X[current_action_set_config_idx]
                     possible_actions_indices_in_initial_set = []
                     for i, action_tuple_in_initial in enumerate(INITIAL_ACTION_SET_FOR_ENV):
-                        # action_tuple_in_initial は ['コマンド', 'コマンド', ...] の形
-                        # current_allowed_action_list の要素も同じ形
-                        if list(action_tuple_in_initial) in current_allowed_action_list : # list()で比較
-                             possible_actions_indices_in_initial_set.append(i)
-                        elif tuple(action_tuple_in_initial) in current_allowed_action_list: # tuple()でも比較（念のため）
-                             possible_actions_indices_in_initial_set.append(i)
-
+                        if list(action_tuple_in_initial) in current_allowed_action_list or tuple(action_tuple_in_initial) in current_allowed_action_list:
+                            possible_actions_indices_in_initial_set.append(i)
 
                     if not possible_actions_indices_in_initial_set:
                         print(f"WARNING: No allowed actions for current_x ({current_x_pos_before_action}), config_idx ({current_action_set_config_idx}). Defaulting to random from INITIAL_ACTION_SET_FOR_ENV.")
                         possible_actions_indices_in_initial_set = list(range(len(INITIAL_ACTION_SET_FOR_ENV)))
-                    
-                    effective_candidate_indices = possible_actions_indices_in_initial_set
-                    # overall_best_x_pos ではなく current_episode_max_x を基準に「未知のエリア」かを判断することも検討可能
-                    is_in_truly_unknown_area = current_x_pos_before_action > overall_best_x_pos
-                    if not is_in_truly_unknown_area and short_term_failure_actions and SHORT_TERM_FAILURE_MEMORY_SIZE > 0:
-                        filtered_by_failure = [i for i in effective_candidate_indices if i not in list(short_term_failure_actions)]
-                        if filtered_by_failure:
-                            effective_candidate_indices = filtered_by_failure
-                    
-                    if effective_candidate_indices:
-                        current_held_action_idx = random.choice(effective_candidate_indices)
-                    else: 
-                        current_held_action_idx = random.choice(possible_actions_indices_in_initial_set) if possible_actions_indices_in_initial_set else random.randrange(len(INITIAL_ACTION_SET_FOR_ENV))
+
+                    # --- 停滞ブースト: Xが一定時間伸びない場合は、強気のサブセットを優先 ---
+                    now_t = time.time()
+                    if now_t - last_progress_time > STALL_TIME_SEC and boost_mode_remaining <= 0:
+                        boost_mode_remaining = BOOST_DECISIONS
+                        print(f"DEBUG: Stall detected at X={current_x_pos_before_action}. Enter BOOST mode for {BOOST_DECISIONS} decisions.")
+                    if boost_mode_remaining > 0:
+                        boost_candidates = []
+                        for i, action_tuple_in_initial in enumerate(INITIAL_ACTION_SET_FOR_ENV):
+                            if list(action_tuple_in_initial) in BOOST_ACTION_SET or tuple(action_tuple_in_initial) in BOOST_ACTION_SET:
+                                boost_candidates.append(i)
+                        # ブースト候補と許可候補の積集合
+                        boost_candidates = [i for i in boost_candidates if i in possible_actions_indices_in_initial_set]
+                        if boost_candidates:
+                            possible_actions_indices_in_initial_set = boost_candidates
+                        boost_mode_remaining -= 1
+
+                    # --- バンディット選択: 前回の決定に対する報酬を更新してから、今回の行動を選ぶ ---
+                    update_bandit_from_transition(last_decision_record, current_x_pos_before_action, False, info)
+                    current_bin = get_x_bin(current_x_pos_before_action)
+                    if possible_actions_indices_in_initial_set:
+                        current_held_action_idx = choose_action_with_bandit(current_bin, possible_actions_indices_in_initial_set)
+                    else:
+                        current_held_action_idx = random.randrange(len(INITIAL_ACTION_SET_FOR_ENV))
+
+                    # 今回の決定を記録（次の決定時またはエピソード終了時に報酬計算）
+                    last_decision_record = {'bin': current_bin, 'action': current_held_action_idx, 'x': current_x_pos_before_action}
                     
                     action_idx_for_this_frame = current_held_action_idx
                 else:
@@ -652,6 +748,11 @@ def game_loop(env):
                 next_state_frame, reward, terminated, truncated, current_step_info = env.step(action_idx_to_step)
                 current_x_pos_after_action = current_step_info.get('x_pos', 0)
                 episode_frame_by_frame_log.append((action_idx_to_step, current_x_pos_after_action))
+                
+                # 進捗があれば停滞タイマーをリセット
+                if current_x_pos_after_action > last_progress_x:
+                    last_progress_x = current_x_pos_after_action
+                    last_progress_time = time.time()
 
                 if previous_x_pos - current_x_pos_after_action >= 300:
                     print(f"DEBUG: Loop Detected! Ep: {episode_count}, PrevX(before step): {previous_x_pos}, CurrX(after step): {current_x_pos_after_action}")
@@ -727,7 +828,16 @@ def game_loop(env):
                 elif info.get('loop_detected_event', False): game_over_text_str = "LOOP DETECTED"
                 elif info.get('time', 400) <= 1: game_over_text_str = "TIME UP"
                 else: game_over_text_str = "GAME OVER"
+                
+                # --- 最後の決定の報酬更新（死亡/クリアなどを反映） ---
+                update_bandit_from_transition(last_decision_record, info.get('x_pos', 0), True, info)
+                
+                prev_overall_best = overall_best_x_pos
                 update_memory_at_episode_end(info, episode_frame_by_frame_log, current_episode_max_x, total_episode_reward)
+                if overall_best_x_pos > prev_overall_best:
+                    episodes_without_improvement = 0
+                else:
+                    episodes_without_improvement += 1
                 game_over_surf = font_medium.render(game_over_text_str, True, (255, 60, 60))
                 text_rect = game_over_surf.get_rect(center=GAME_SCREEN_RECT.center)
                 screen.blit(game_over_surf, text_rect)
