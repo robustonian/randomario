@@ -72,6 +72,9 @@ uv run main.py --stage 7-4 --x-bin-size 10 --death-penalty 40      # Fine-graine
 uv run main.py --stage 4-4 --replay-backoff 160 --epsilon 0.15     # High diversity exploration
 uv run main.py --stage 1-1 --stall-time 1.5 --ucb-c 1.8          # Aggressive stall detection
 
+# Use original random behavior (disable all learning)
+uv run main.py --stage 1-1 --random                               # Pure random action selection
+
 # Show help for command line options (includes parameter ranges)
 uv run main.py --help
 ```

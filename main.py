@@ -907,10 +907,18 @@ Learning Parameters (adjustable ranges):
   --replay-backoff: 80-160, larger=earlier exploration switch, more diversity  
   --stall-time: 1.5-3.0, stagnation detection sensitivity
   --death-penalty: 20-40, adjust based on stage difficulty
+
+Legacy Mode:
+  --random: Disable all learning features and use pure random action selection
+           (equivalent to original behavior before bandit learning implementation)
         """)
     
     parser.add_argument('--stage', '-s', type=str, default='1-1', 
                        help='Stage to play (e.g., 1-1, 2-1, 3-1, 4-1, 8-4). Default: 1-1')
+    
+    # Legacy mode switch
+    parser.add_argument('--random', action='store_true',
+                       help='Use original random behavior (disables all learning features)')
     
     # Learning parameters
     parser.add_argument('--x-bin-size', type=int, default=20,
@@ -930,15 +938,29 @@ Learning Parameters (adjustable ranges):
 
 def apply_learning_parameters(args):
     """コマンド引数から学習パラメータを適用"""
-    global X_BIN_SIZE, REPLAY_BACKOFF_X, STALL_TIME_SEC, DEATH_PENALTY, EPSILON_GREEDY, UCB_C
-    X_BIN_SIZE = args.x_bin_size
-    REPLAY_BACKOFF_X = args.replay_backoff  
-    STALL_TIME_SEC = args.stall_time
-    DEATH_PENALTY = args.death_penalty
-    EPSILON_GREEDY = args.epsilon
-    UCB_C = args.ucb_c
+    global X_BIN_SIZE, REPLAY_BACKOFF_X, STALL_TIME_SEC, DEATH_PENALTY, EPSILON_GREEDY, UCB_C, BOOST_DECISIONS
     
-    print(f"Learning Parameters: bin_size={X_BIN_SIZE}, backoff={REPLAY_BACKOFF_X}, stall_time={STALL_TIME_SEC}, death_penalty={DEATH_PENALTY}, epsilon={EPSILON_GREEDY}, ucb_c={UCB_C}")
+    if args.random:
+        # 完全ランダム（元の挙動）モード
+        EPSILON_GREEDY = 1.0          # 常に一様ランダム
+        UCB_C = 0.0                   # UCB無効化（使われなくなる）
+        REPLAY_BACKOFF_X = -1         # X座標リプレイ打ち切り無効化
+        STALL_TIME_SEC = 1e9          # 停滞検出を実質無効化
+        BOOST_DECISIONS = 0           # ブースト無効化
+        DEATH_PENALTY = 0.0           # 死亡ペナルティ無効化
+        X_BIN_SIZE = args.x_bin_size  # 念のため維持（実質使われない）
+        print("RANDOM MODE: All learning features disabled (equivalent to original behavior)")
+        print(f"Random Parameters: epsilon={EPSILON_GREEDY}, replay_backoff={REPLAY_BACKOFF_X}, stall_time={STALL_TIME_SEC}, boost_decisions={BOOST_DECISIONS}")
+    else:
+        # バンディット学習モード（デフォルト）
+        X_BIN_SIZE = args.x_bin_size
+        REPLAY_BACKOFF_X = args.replay_backoff  
+        STALL_TIME_SEC = args.stall_time
+        DEATH_PENALTY = args.death_penalty
+        EPSILON_GREEDY = args.epsilon
+        UCB_C = args.ucb_c
+        print("BANDIT LEARNING MODE: Statistical optimization enabled")
+        print(f"Learning Parameters: bin_size={X_BIN_SIZE}, backoff={REPLAY_BACKOFF_X}, stall_time={STALL_TIME_SEC}, death_penalty={DEATH_PENALTY}, epsilon={EPSILON_GREEDY}, ucb_c={UCB_C}")
 
 if __name__ == '__main__':
     args = parse_arguments()
