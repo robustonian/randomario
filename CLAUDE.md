@@ -22,11 +22,18 @@ RandoMario is a Super Mario Bros. automation project built in Python that uses O
 
 ### Action System Architecture
 The codebase uses a sophisticated action switching system:
+- `STAGE_STRATEGIES`: Dictionary containing stage-specific strategy configurations
 - `X_THRESHOLDS_FOR_ACTION_SET_SWITCH`: Defines X-coordinate thresholds for action set changes
 - `ALLOWED_ACTIONS_SUBSETS_BY_X`: Maps position ranges to specific action sets
 - `ACTION_SET_NAMES_BY_X`: Human-readable names for each action set
 
-Different levels have commented-out configurations (4-4, 6-2, 7-4) showing the system's flexibility.
+**Supported Stage Strategies:**
+- **4-4**: 6-stage strategy with specialized actions for maze navigation
+- **6-2**: 3-stage strategy with simple movement transitions
+- **7-4**: 10-stage complex strategy with precise dash/jump combinations
+- **default**: Basic RIGHT_ONLY strategy for all other stages
+
+The system automatically selects the appropriate strategy based on the specified stage.
 
 ## Development Commands
 
@@ -38,9 +45,11 @@ uv sync
 # Run the main application (default: stage 1-1)
 uv run main.py
 
-# Run with specific stage
-uv run main.py --stage 2-1
-uv run main.py -s 4-1
+# Run with specific stage (uses specialized strategy if available)
+uv run main.py --stage 7-4  # Uses 10-stage complex strategy
+uv run main.py -s 4-4       # Uses 6-stage maze strategy
+uv run main.py -s 6-2       # Uses 3-stage simple strategy
+uv run main.py -s 1-1       # Uses default strategy
 
 # Show help for command line options
 uv run main.py --help
@@ -71,7 +80,10 @@ The code uses extensive global variables for state management:
 - Game state variables (positions, action sets, feedback mechanisms)
 
 ### Configuration-Driven Approach
-Action behaviors are controlled through configuration arrays rather than hardcoded logic, making it easy to create level-specific strategies by modifying the threshold and action set arrays.
+Action behaviors are controlled through the `STAGE_STRATEGIES` dictionary rather than hardcoded logic:
+- Each stage can have its own X-coordinate thresholds and action sets
+- The `setup_stage_strategy()` function dynamically configures the behavior
+- Easy to add new stages by extending the `STAGE_STRATEGIES` dictionary
 
 ### Auto-Resource Management
 The application automatically downloads required assets (controller image) from external sources if not present locally.

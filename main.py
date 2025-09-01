@@ -43,103 +43,98 @@ RIGHT_DASH_JUMP_ONLY = [
 ]
 # ACTION_SET_RIGHT_DASH_JUMP_ONLY = RIGHT_DASH_JUMP_ONLY
 
+# --- ステージ別戦略定義 ---
+STAGE_STRATEGIES = {
+    'default': {
+        'thresholds': [0],
+        'actions': [ACTION_SET_RIGHT_ONLY],
+        'names': ["RIGHT_ONLY"]
+    },
+    '7-4': {
+        'thresholds': [0, 435, 815, 900, 1050, 1150, 1520, 1755, 2260, 2400],
+        'actions': [
+            ACTION_SET_RIGHT_ONLY,
+            RIGHT_DASH_ONLY_NO_JUMP,
+            RIGHT_DASH_JUMP_ONLY,
+            RIGHT_DASH_ONLY_NO_JUMP,
+            RIGHT_DASH_JUMP_ONLY,
+            RIGHT_ONLY_NO_JUMP,
+            RIGHT_DASH_JUMP_ONLY,
+            ACTION_SET_RIGHT_ONLY,
+            RIGHT_ONLY_NO_JUMP,
+            ACTION_SET_RIGHT_ONLY,
+        ],
+        'names': [
+            "RIGHT_ONLY",
+            "RIGHT_DASH_ONLY_NO_JUMP",
+            "RIGHT_DASH_JUMP_ONLY",
+            "RIGHT_DASH_ONLY_NO_JUMP", 
+            "RIGHT_DASH_JUMP_ONLY",
+            "RIGHT_ONLY_NO_JUMP",
+            "RIGHT_DASH_JUMP_ONLY",
+            "RIGHT_ONLY",
+            "RIGHT_ONLY_NO_JUMP",
+            "RIGHT_ONLY",
+        ]
+    },
+    '6-2': {
+        'thresholds': [0, 1370, 1400],
+        'actions': [
+            ACTION_SET_RIGHT_ONLY,
+            ACTION_SET_SIMPLE,
+            ACTION_SET_RIGHT_ONLY,
+        ],
+        'names': [
+            "RIGHT_ONLY",
+            "SIMPLE",
+            "RIGHT_ONLY",
+        ]
+    },
+    '4-4': {
+        'thresholds': [0, 915, 1050, 1450, 1550, 1675],
+        'actions': [
+            ACTION_SET_RIGHT_ONLY,
+            RIGHT_ONLY_NO_JUMP,
+            ACTION_SET_RIGHT_ONLY,
+            ACTION_SET_SIMPLE,
+            WALK_NO_JUMP,
+            ACTION_SET_RIGHT_ONLY,
+        ],
+        'names': [
+            "RIGHT_ONLY",
+            "RIGHT_ONLY_NO_JUMP",
+            "RIGHT_ONLY",
+            "SIMPLE",
+            "WALK_ONLY_NO_JUMP", 
+            "RIGHT_ONLY",
+        ]
+    }
+}
+
 # --- X座標によるアクションセット切り替え設定 ---
-X_THRESHOLDS_FOR_ACTION_SET_SWITCH = [0]
-ALLOWED_ACTIONS_SUBSETS_BY_X = [
-    ACTION_SET_RIGHT_ONLY,
-    # ACTION_SET_SIMPLE,
-]
-ACTION_SET_NAMES_BY_X = [
-    "RIGHT_ONLY",
-    # "SIMPLE",
-]
+# これらの変数は後で設定される
+X_THRESHOLDS_FOR_ACTION_SET_SWITCH = []
+ALLOWED_ACTIONS_SUBSETS_BY_X = []
+ACTION_SET_NAMES_BY_X = []
 
-# 7-4
-# X_THRESHOLDS_FOR_ACTION_SET_SWITCH = [0, 435, 815, 900, 1050, 1150, 1520, 1755, 2260, 2400]
-# ALLOWED_ACTIONS_SUBSETS_BY_X = [
-#     ACTION_SET_RIGHT_ONLY,
-#     RIGHT_DASH_ONLY_NO_JUMP,
-#     RIGHT_DASH_JUMP_ONLY,
-#     RIGHT_DASH_ONLY_NO_JUMP,
-#     RIGHT_DASH_JUMP_ONLY,
-#     RIGHT_ONLY_NO_JUMP,
-#     RIGHT_DASH_JUMP_ONLY,
-#     ACTION_SET_RIGHT_ONLY,
-#     RIGHT_ONLY_NO_JUMP,
-#     ACTION_SET_RIGHT_ONLY,
-# ]
-# ACTION_SET_NAMES_BY_X = [
-#     "RIGHT_ONLY",
-#     "RIGHT_DASH_ONLY_NO_JUMP",
-#     "RIGHT_DASH_JUMP_ONLY",
-#     "RIGHT_DASH_ONLY_NO_JUMP",
-#     "RIGHT_DASH_JUMP_ONLY",
-#     "RIGHT_ONLY_NO_JUMP",
-#     "RIGHT_DASH_JUMP_ONLY",
-#     "RIGHT_ONLY",
-#     "RIGHT_ONLY_NO_JUMP",
-#     "RIGHT_ONLY",
-# ]
 
-# 6-2
-# X_THRESHOLDS_FOR_ACTION_SET_SWITCH = [0, 1370, 1400]
-# ALLOWED_ACTIONS_SUBSETS_BY_X = [
-#     ACTION_SET_RIGHT_ONLY,
-#     ACTION_SET_SIMPLE,
-#     ACTION_SET_RIGHT_ONLY,
-# ]
-# ACTION_SET_NAMES_BY_X = [
-#     "RIGHT_ONLY",
-#     "SIMPLE",
-#     "RIGHT_ONLY",
-# ]
+def validate_strategy_dimensions():
+    """戦略設定の次元確認（setup_stage_strategy後に呼び出し）"""
+    if len(X_THRESHOLDS_FOR_ACTION_SET_SWITCH) != len(ALLOWED_ACTIONS_SUBSETS_BY_X):
+        raise ValueError(f"X_THRESHOLDS_FOR_ACTION_SET_SWITCH ({len(X_THRESHOLDS_FOR_ACTION_SET_SWITCH)}) と ALLOWED_ACTIONS_SUBSETS_BY_X ({len(ALLOWED_ACTIONS_SUBSETS_BY_X)}) の長さが一致していません")
 
-# 4-4
-# X_THRESHOLDS_FOR_ACTION_SET_SWITCH = [0, 915, 1050, 1450, 1550, 1675]
-# ALLOWED_ACTIONS_SUBSETS_BY_X = [
-#     ACTION_SET_RIGHT_ONLY,
-#     ACTION_SET_RIGHT_ONLY_NO_JUMP,
-#     ACTION_SET_RIGHT_ONLY,
-#     ACTION_SET_SIMPLE,
-#     ACTION_SET_WALK_ONLY_NO_JUMP,
-#     ACTION_SET_RIGHT_ONLY,
-  
-# ]
-# ACTION_SET_NAMES_BY_X = [
-#     "RIGHT_ONLY",
-#     "RIGHT_ONLY_NO_JUMP",
-#     "RIGHT_ONLY",
-#     "SIMPLE", 
-#     "WALK_ONLY_NO_JUMP",
-#     "RIGHT_ONLY",
-# ]
+    if len(X_THRESHOLDS_FOR_ACTION_SET_SWITCH) != len(ACTION_SET_NAMES_BY_X):
+        raise ValueError(f"X_THRESHOLDS_FOR_ACTION_SET_SWITCH ({len(X_THRESHOLDS_FOR_ACTION_SET_SWITCH)}) と ACTION_SET_NAMES_BY_X ({len(ACTION_SET_NAMES_BY_X)}) の長さが一致していません")
 
-# X_THRESHOLDS_FOR_ACTION_SET_SWITCH = [0, 500, 1500]
-# ALLOWED_ACTIONS_SUBSETS_BY_X = [
-#     ACTION_SET_SIMPLE,
-#     ACTION_SET_COMPLEX,
-#     ACTION_SET_RIGHT_ONLY
-# ]
-# ACTION_SET_NAMES_BY_X = [
-#     "SIMPLE (X < 500)",
-#     "COMPLEX (500 <= X < 1500)",
-#     "RIGHT_ONLY (X >= 1500)"
-# ]
-
-# 次元の確認
-if len(X_THRESHOLDS_FOR_ACTION_SET_SWITCH) != len(ALLOWED_ACTIONS_SUBSETS_BY_X):
-    raise ValueError(f"X_THRESHOLDS_FOR_ACTION_SET_SWITCH ({len(X_THRESHOLDS_FOR_ACTION_SET_SWITCH)}) と ALLOWED_ACTIONS_SUBSETS_BY_X ({len(ALLOWED_ACTIONS_SUBSETS_BY_X)}) の長さが一致していません")
-
-if len(X_THRESHOLDS_FOR_ACTION_SET_SWITCH) != len(ACTION_SET_NAMES_BY_X):
-    raise ValueError(f"X_THRESHOLDS_FOR_ACTION_SET_SWITCH ({len(X_THRESHOLDS_FOR_ACTION_SET_SWITCH)}) と ACTION_SET_NAMES_BY_X ({len(ACTION_SET_NAMES_BY_X)}) の長さが一致していません")
-
+# グローバル変数の初期化（後で設定される）
 current_action_set_config_idx = 0
 
 INITIAL_ACTION_SET_FOR_ENV = ACTION_SET_COMPLEX # JoypadSpace はこれで初期化
 INITIAL_ACTION_SET_NAME_FOR_ENV = "COMPLEX_BASE" # (デバッグ用)
 
-CURRENT_ACTION_SET = ALLOWED_ACTIONS_SUBSETS_BY_X[current_action_set_config_idx] # 探索時のフィルタリング用
-CURRENT_ACTION_SET_NAME = ACTION_SET_NAMES_BY_X[current_action_set_config_idx]   # 表示用
+# これらは setup_stage_strategy() で設定される
+CURRENT_ACTION_SET = []
+CURRENT_ACTION_SET_NAME = ""
 
 # --- Pygame 定数 (変更なし) ---
 SCREEN_WIDTH = 1024
@@ -766,6 +761,32 @@ def game_loop(env):
     pygame.quit()
     sys.exit()
 
+def setup_stage_strategy(stage):
+    """指定されたステージに応じて戦略を設定"""
+    global X_THRESHOLDS_FOR_ACTION_SET_SWITCH, ALLOWED_ACTIONS_SUBSETS_BY_X, ACTION_SET_NAMES_BY_X
+    global current_action_set_config_idx, CURRENT_ACTION_SET, CURRENT_ACTION_SET_NAME
+    
+    # ステージ固有の戦略があるかチェック
+    if stage in STAGE_STRATEGIES:
+        strategy = STAGE_STRATEGIES[stage]
+        print(f"Using specialized strategy for stage {stage}")
+    else:
+        strategy = STAGE_STRATEGIES['default']
+        print(f"Using default strategy for stage {stage}")
+    
+    # 戦略設定を適用
+    X_THRESHOLDS_FOR_ACTION_SET_SWITCH = strategy['thresholds']
+    ALLOWED_ACTIONS_SUBSETS_BY_X = strategy['actions']
+    ACTION_SET_NAMES_BY_X = strategy['names']
+    
+    # グローバル変数を更新
+    current_action_set_config_idx = 0
+    CURRENT_ACTION_SET = ALLOWED_ACTIONS_SUBSETS_BY_X[current_action_set_config_idx]
+    CURRENT_ACTION_SET_NAME = ACTION_SET_NAMES_BY_X[current_action_set_config_idx]
+    
+    # 設定の妥当性を確認
+    validate_strategy_dimensions()
+
 def parse_arguments():
     parser = argparse.ArgumentParser(description='RandoMario - Super Mario Bros. Random Action Agent')
     parser.add_argument('--stage', '-s', type=str, default='1-1', 
@@ -775,6 +796,9 @@ def parse_arguments():
 if __name__ == '__main__':
     args = parse_arguments()
     print(f"Starting RandoMario on stage {args.stage}")
+    
+    # ステージに応じた戦略を設定
+    setup_stage_strategy(args.stage)
     
     init_pygame()
     mario_environment = init_mario_env(args.stage)
