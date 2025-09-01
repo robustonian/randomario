@@ -898,14 +898,50 @@ def setup_stage_strategy(stage):
     validate_strategy_dimensions()
 
 def parse_arguments():
-    parser = argparse.ArgumentParser(description='RandoMario - Super Mario Bros. Random Action Agent')
+    parser = argparse.ArgumentParser(
+        description='RandoMario - Super Mario Bros. Bandit Learning Agent',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Learning Parameters (adjustable ranges):
+  --x-bin-size: 10-40, smaller=more local optimization, larger=more generalization
+  --replay-backoff: 80-160, larger=earlier exploration switch, more diversity  
+  --stall-time: 1.5-3.0, stagnation detection sensitivity
+  --death-penalty: 20-40, adjust based on stage difficulty
+        """)
+    
     parser.add_argument('--stage', '-s', type=str, default='1-1', 
                        help='Stage to play (e.g., 1-1, 2-1, 3-1, 4-1, 8-4). Default: 1-1')
+    
+    # Learning parameters
+    parser.add_argument('--x-bin-size', type=int, default=20,
+                       help='X-coordinate bin size for learning (default: 20, range: 10-40)')
+    parser.add_argument('--replay-backoff', type=int, default=120,
+                       help='Distance from best X to start exploration (default: 120, range: 80-160)')  
+    parser.add_argument('--stall-time', type=float, default=2.0,
+                       help='Seconds without X progress to detect stall (default: 2.0, range: 1.5-3.0)')
+    parser.add_argument('--death-penalty', type=float, default=20.0,
+                       help='Penalty points for death/falling (default: 20.0, range: 20-40)')
+    parser.add_argument('--epsilon', type=float, default=0.10,
+                       help='Random exploration probability (default: 0.10, range: 0.05-0.20)')
+    parser.add_argument('--ucb-c', type=float, default=1.2,
+                       help='UCB exploration parameter (default: 1.2, range: 0.8-2.0)')
+    
     return parser.parse_args()
 
 if __name__ == '__main__':
     args = parse_arguments()
     print(f"Starting RandoMario on stage {args.stage}")
+    
+    # コマンド引数からパラメータを適用
+    global X_BIN_SIZE, REPLAY_BACKOFF_X, STALL_TIME_SEC, DEATH_PENALTY, EPSILON_GREEDY, UCB_C
+    X_BIN_SIZE = args.x_bin_size
+    REPLAY_BACKOFF_X = args.replay_backoff  
+    STALL_TIME_SEC = args.stall_time
+    DEATH_PENALTY = args.death_penalty
+    EPSILON_GREEDY = args.epsilon
+    UCB_C = args.ucb_c
+    
+    print(f"Learning Parameters: bin_size={X_BIN_SIZE}, backoff={REPLAY_BACKOFF_X}, stall_time={STALL_TIME_SEC}, death_penalty={DEATH_PENALTY}, epsilon={EPSILON_GREEDY}, ucb_c={UCB_C}")
     
     # ステージに応じた戦略を設定
     setup_stage_strategy(args.stage)

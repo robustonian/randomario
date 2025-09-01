@@ -32,14 +32,15 @@ The codebase uses a sophisticated action switching system with statistical learn
 - `ACTION_SET_NAMES_BY_X`: Human-readable names for each action set
 
 **Bandit Learning System:**
-- `X_BIN_SIZE`: Divides X-coordinates into bins for localized learning (default: 20px)
+- `X_BIN_SIZE`: Divides X-coordinates into bins for localized learning (default: 20px, range: 10-40)
 - `bandit_stats`: Tracks success/failure statistics for each action in each X-bin
-- `UCB_C`: Upper Confidence Bound exploration parameter (default: 1.2)
-- `EPSILON_GREEDY`: Random exploration probability (default: 0.10)
+- `UCB_C`: Upper Confidence Bound exploration parameter (default: 1.2, range: 0.8-2.0)
+- `EPSILON_GREEDY`: Random exploration probability (default: 0.10, range: 0.05-0.20)
 
 **Adaptive Exploration:**
-- `REPLAY_BACKOFF_X`: Early replay cutoff distance from best X (default: 120px)
-- `STALL_TIME_SEC`: Stagnation detection threshold (default: 2.0s)
+- `REPLAY_BACKOFF_X`: Early replay cutoff distance from best X (default: 120px, range: 80-160)
+- `STALL_TIME_SEC`: Stagnation detection threshold (default: 2.0s, range: 1.5-3.0)
+- `DEATH_PENALTY`: Penalty for death/falling actions (default: 20.0, range: 20-40)
 - `BOOST_DECISIONS`: Aggressive action count during stall recovery (default: 8)
 
 **Supported Stage Strategies:**
@@ -66,7 +67,12 @@ uv run main.py -s 4-4       # Uses 6-stage maze strategy
 uv run main.py -s 6-2       # Uses 3-stage simple strategy
 uv run main.py -s 1-1       # Uses default strategy
 
-# Show help for command line options
+# Tune learning parameters for optimization
+uv run main.py --stage 7-4 --x-bin-size 10 --death-penalty 40      # Fine-grained learning
+uv run main.py --stage 4-4 --replay-backoff 160 --epsilon 0.15     # High diversity exploration
+uv run main.py --stage 1-1 --stall-time 1.5 --ucb-c 1.8          # Aggressive stall detection
+
+# Show help for command line options (includes parameter ranges)
 uv run main.py --help
 ```
 
@@ -103,10 +109,13 @@ Action behaviors are controlled through multiple sophisticated systems:
 - Easy to add new stages by extending the configuration
 
 **Learning Parameters:**
-- Bandit learning parameters can be tuned via global constants
-- X-coordinate binning size affects learning granularity
-- UCB exploration vs exploitation balance is configurable
-- Stall detection sensitivity and recovery behavior is adjustable
+All bandit learning parameters are configurable via command line arguments:
+- `--x-bin-size`: Binning granularity (10-40, smaller=local optimization, larger=generalization)
+- `--replay-backoff`: Early exploration distance (80-160, larger=more diversity)
+- `--stall-time`: Stagnation sensitivity (1.5-3.0 seconds)
+- `--death-penalty`: Learning penalty for deaths (20-40, adjust by stage difficulty)
+- `--epsilon`: Random exploration rate (0.05-0.20)
+- `--ucb-c`: UCB exploration strength (0.8-2.0)
 
 **Adaptive Systems:**
 - `get_x_bin()`: Maps positions to learning bins
