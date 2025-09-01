@@ -928,11 +928,8 @@ Learning Parameters (adjustable ranges):
     
     return parser.parse_args()
 
-if __name__ == '__main__':
-    args = parse_arguments()
-    print(f"Starting RandoMario on stage {args.stage}")
-    
-    # コマンド引数からパラメータを適用
+def apply_learning_parameters(args):
+    """コマンド引数から学習パラメータを適用"""
     global X_BIN_SIZE, REPLAY_BACKOFF_X, STALL_TIME_SEC, DEATH_PENALTY, EPSILON_GREEDY, UCB_C
     X_BIN_SIZE = args.x_bin_size
     REPLAY_BACKOFF_X = args.replay_backoff  
@@ -942,6 +939,13 @@ if __name__ == '__main__':
     UCB_C = args.ucb_c
     
     print(f"Learning Parameters: bin_size={X_BIN_SIZE}, backoff={REPLAY_BACKOFF_X}, stall_time={STALL_TIME_SEC}, death_penalty={DEATH_PENALTY}, epsilon={EPSILON_GREEDY}, ucb_c={UCB_C}")
+
+if __name__ == '__main__':
+    args = parse_arguments()
+    print(f"Starting RandoMario on stage {args.stage}")
+    
+    # コマンド引数からパラメータを適用
+    apply_learning_parameters(args)
     
     # ステージに応じた戦略を設定
     setup_stage_strategy(args.stage)
