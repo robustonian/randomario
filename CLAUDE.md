@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-RandoMario is a Super Mario Bros. automation project built in Python that uses OpenAI Gym's `gym-super-mario-bros` environment. The project features a random action agent that plays Mario automatically while displaying both the game screen and a visual representation of the Nintendo Famicom controller inputs in real-time using Pygame.
+RandoMario is a Super Mario Bros. automation project built in Python that uses OpenAI Gym's `gym-super-mario-bros` environment. The project features an advanced bandit learning AI agent with statistical optimization, exponential decay, persistent storage, and Top-K replay diversity that plays Mario automatically while displaying both the game screen and a visual representation of the Nintendo Famicom controller inputs in real-time using Pygame.
 
 ## Core Architecture
 
@@ -123,7 +123,32 @@ All bandit learning parameters are configurable via command line arguments:
 **Adaptive Systems:**
 - `get_x_bin()`: Maps positions to learning bins
 - `choose_action_with_bandit()`: Statistical action selection
-- `update_bandit_from_transition()`: Reward-based learning updates
+- `update_bandit_from_transition()`: Enhanced reward-based learning updates with time penalty, backtrack detection, and stall penalty
+
+### Advanced Learning Features (v2 Improvements)
+
+**Exponential Decay System:**
+- `DECAY = 0.99`: Applies exponential decay to bandit statistics for non-stationary adaptation
+- Past statistics are weighted down to help escape local optima
+- Enables better adaptation to environment changes
+
+**Enhanced Reward System:**
+- Time penalty: -0.01 per decision to favor faster progress
+- Backtrack penalty: -2.0 when X position decreases
+- Stall penalty: -1.0 during detected stagnation periods
+- Dynamic reward calculation based on progress patterns
+
+**Persistent Storage System:**
+- `save_stats(stage)` and `load_stats(stage)`: JSON-based persistence per stage
+- Automatic saving every 100 episodes and on program exit
+- Cross-session learning continuity with stage-specific statistics
+
+**Top-K Replay Diversity:**
+- `TOP_K_SEQUENCES = 5`: Maintains multiple successful sequences instead of just one
+- `calculate_sequence_diversity()`: Edit distance-based diversity scoring
+- Minimum diversity threshold prevents overly similar sequences
+- Random sequence selection (20% probability) from Top-K during replay
+- ±20px randomization of replay cutoff positions for exploration variety
 
 ### Auto-Resource Management
 The application automatically downloads required assets (controller image) from external sources if not present locally.

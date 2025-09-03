@@ -11,6 +11,7 @@ import argparse  # コマンド引数解析用に追加
 from collections import deque
 import urllib.request # 画像ダウンロード用に追加
 import urllib.error   # エラーハンドリング用に追加
+import json           # 永続化ストレージ用に追加
 
 # --- アクションセットの定義 ---
 ACTION_SET_COMPLEX = COMPLEX_MOVEMENT
@@ -197,6 +198,8 @@ STALL_TIME_SEC = 2.0            # この秒数Xが伸びなければ「停滞」
 REPLAY_BACKOFF_X = 120          # ベストXからこのpx手前でリプレイを打ち切って探索開始
 BOOST_DECISIONS = 8             # ブーストモードで強気アクションを続ける決定回数
 BOOST_ACTION_SET = RIGHT_DASH_JUMP_ONLY  # ブースト時のアクション候補
+DECAY = 0.99                     # 指数減衰パラメータ: 環境変化や局所最適からの脱出を促進
+TOP_K_SEQUENCES = 5              # 保存する成功シーケンスの最大数（Top-K）
 
 # --- バンディット学習用（追加） ---
 bandit_stats = {}   # {bin:int -> {action_idx:int -> {'n':int,'sum':float}}}
@@ -307,14 +310,14 @@ def init_pygame():
         if data['type'] == 'rect':
             orig_rect = data['geom']
             scaled_rect = pygame.Rect(
-                orig_rect.left * scale_x, orig_rect.top * scale_y,
+                int(orig_rect.left * scale_x), int(orig_rect.top * scale_y),
                 max(1, int(orig_rect.width * scale_x)), max(1, int(orig_rect.height * scale_y))
             )
             scaled_button_geometries[key] = {'type': 'rect', 'geom': scaled_rect}
         elif data['type'] == 'circle':
             orig_center, orig_radius = data['geom']
-            scaled_center_x = orig_center[0] * scale_x
-            scaled_center_y = orig_center[1] * scale_y
+            scaled_center_x = int(orig_center[0] * scale_x)
+            scaled_center_y = int(orig_center[1] * scale_y)
             scaled_radius = max(1, int(orig_radius * min(scale_x, scale_y)))
             scaled_button_geometries[key] = {'type': 'circle', 'geom': ((scaled_center_x, scaled_center_y), scaled_radius)}
 
@@ -348,7 +351,7 @@ def choose_action_with_bandit(bin_id, candidate_indices):
             best_i = i
     return best_i if best_i is not None else (random.choice(candidate_indices) if candidate_indices else 0)
 
-def update_bandit_from_transition(prev_decision, curr_x, done, info):
+def update_bandit_from_transition(prev_decision, curr_x, done, info, prev_x=None, is_stalled=False):
     # 直前の決定に対し、現在Xとの差分を報酬として更新
     if not prev_decision:
         return
@@ -356,15 +359,109 @@ def update_bandit_from_transition(prev_decision, curr_x, done, info):
     delta = float(curr_x - x0)
     reward = delta
 
+    # 時間ペナルティ: 毎決定で小さなペナルティを課す（ゆっくり進むよりサクサク進む方を優遇）
+    reward -= 0.01
+    
+    # バックトラック・足踏みの明示ペナルティ
+    if prev_x is not None and curr_x < prev_x:
+        reward -= 2.0  # バックトラック時の追加ペナルティ
+    
+    # 停滞ペナルティ（停滞検出時の追加ペナルティ）
+    if is_stalled:
+        reward -= 1.0
+
     if done and not info.get('flag_get', False):
         # 死亡時に追加ペナルティ（落下死は大きめ）
         y = info.get('y_pos', 0); ps = info.get('player_state', 0)
         is_fall = (y >= 250) or (ps == 0x0b)
         reward -= (DEATH_PENALTY if is_fall else DEATH_PENALTY * 0.5)
 
-    d = bandit_stats.setdefault(b, {}).setdefault(a, {'n':0, 'sum':0.0})
-    d['n'] += 1
-    d['sum'] += reward
+    d = bandit_stats.setdefault(b, {}).setdefault(a, {'n':0.0, 'sum':0.0})
+    # 指数減衰を適用: 過去の統計に重みを減衰させて新しい報酬を加える
+    d['n'] = d['n'] * DECAY + 1.0
+    d['sum'] = d['sum'] * DECAY + reward
+
+def calculate_sequence_diversity(seq1, seq2, max_length_for_comparison=100):
+    """
+    2つのシーケンスの多様性スコアを計算
+    編集距離ベースの類似度を使用し、低いほど類似、高いほど多様
+    """
+    if not seq1 or not seq2:
+        return 1000.0  # 非常に多様とみなす
+    
+    # 長すぎる場合は先頭部分のみを比較
+    s1 = seq1[:max_length_for_comparison]
+    s2 = seq2[:max_length_for_comparison]
+    
+    # 編集距離の簡易計算（アクションインデックスベース）
+    m, n = len(s1), len(s2)
+    if m == 0: return n
+    if n == 0: return m
+    
+    # DP table for edit distance
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    
+    for i in range(m + 1):
+        dp[i][0] = i
+    for j in range(n + 1):
+        dp[0][j] = j
+    
+    for i in range(1, m + 1):
+        for j in range(1, n + 1):
+            # アクションインデックスを比較（sequence_with_x形式: [action_idx, x_pos]）
+            action1 = s1[i-1][0] if len(s1[i-1]) >= 2 else s1[i-1]
+            action2 = s2[j-1][0] if len(s2[j-1]) >= 2 else s2[j-1]
+            
+            if action1 == action2:
+                dp[i][j] = dp[i-1][j-1]
+            else:
+                dp[i][j] = 1 + min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1])
+    
+    return dp[m][n]
+
+def save_stats(stage):
+    """バンディット統計と成功シーケンスをステージごとにJSONファイルに保存"""
+    try:
+        data = {
+            'bandit': bandit_stats,
+            'sequences': successful_sequences,
+            'stage': stage
+        }
+        filename = f'bandit_{stage.replace("-", "_")}.json'
+        with open(filename, 'w') as f:
+            json.dump(data, f, indent=2)
+        print(f"DEBUG: Stats saved to {filename}")
+    except Exception as e:
+        print(f"WARNING: Failed to save stats: {e}")
+
+def load_stats(stage):
+    """バンディット統計と成功シーケンスをステージごとにJSONファイルから読み込み"""
+    try:
+        filename = f'bandit_{stage.replace("-", "_")}.json'
+        with open(filename, 'r') as f:
+            data = json.load(f)
+        
+        # ステージ一致確認
+        if data.get('stage') != stage:
+            print(f"WARNING: Stats file is for stage {data.get('stage')}, not {stage}. Ignoring.")
+            return
+        
+        # 統計をロード
+        bandit_stats.clear()
+        bandit_stats.update(data.get('bandit', {}))
+        
+        # 成功シーケンスをロード
+        successful_sequences.clear()
+        successful_sequences.extend(data.get('sequences', []))
+        
+        print(f"DEBUG: Stats loaded from {filename}")
+        print(f"  - Bandit bins: {len(bandit_stats)}")
+        print(f"  - Successful sequences: {len(successful_sequences)}")
+        
+    except FileNotFoundError:
+        print(f"DEBUG: No existing stats file for stage {stage}")
+    except Exception as e:
+        print(f"WARNING: Failed to load stats: {e}")
 
 def init_mario_env(stage='1-1'):
     global INITIAL_ACTION_SET_FOR_ENV # ★★★ 初期化用のアクションセットを使用
@@ -435,19 +532,46 @@ def update_memory_at_episode_end(final_info_dict, episode_frame_by_frame_actions
             "score": episode_total_reward,
             "cleared": cleared
         }
-        if not successful_sequences:
+        # Top-K システム: 多様性を考慮してシーケンスを管理
+        should_add = True
+        min_diversity_threshold = 10  # 最小多様性スコア
+        
+        # 既存シーケンスと多様性をチェック
+        for existing_seq in successful_sequences:
+            diversity_score = calculate_sequence_diversity(
+                new_sequence_data["sequence_with_x"], 
+                existing_seq["sequence_with_x"]
+            )
+            if diversity_score < min_diversity_threshold:
+                print(f"  New sequence too similar to existing (diversity: {diversity_score:.1f} < {min_diversity_threshold}). Skipping.")
+                should_add = False
+                break
+        
+        if should_add:
+            # 優先度スコア計算: cleared > max_x > score
+            def calc_priority(seq_data):
+                return (
+                    10000 if seq_data["cleared"] else 0,  # クリア優先
+                    seq_data["max_x"],                      # 到達距離
+                    seq_data["score"]                       # スコア
+                )
+            
             successful_sequences.append(new_sequence_data)
-            print(f"  New best sequence stored: X={new_sequence_data['max_x']}, Cleared={new_sequence_data['cleared']}")
+            
+            # 優先度でソート（降順）
+            successful_sequences.sort(key=calc_priority, reverse=True)
+            
+            # Top-K に制限
+            if len(successful_sequences) > TOP_K_SEQUENCES:
+                removed = successful_sequences.pop()
+                print(f"  Sequence added. Removed lowest priority: X={removed['max_x']}, Clr={removed['cleared']}")
+            
+            print(f"  Top-K sequence added: X={new_sequence_data['max_x']}, Clr={new_sequence_data['cleared']}")
+            print(f"  Current Top-{len(successful_sequences)} sequences:")
+            for i, seq in enumerate(successful_sequences):
+                print(f"    #{i+1}: X={seq['max_x']}, Clr={seq['cleared']}, Score={seq['score']:.1f}")
         else:
-            current_best_sequence = successful_sequences[0]
-            new_is_better = (new_sequence_data["cleared"] and not current_best_sequence["cleared"]) or \
-                             (new_sequence_data["cleared"] == current_best_sequence["cleared"] and new_sequence_data["max_x"] > current_best_sequence["max_x"]) or \
-                             (new_sequence_data["cleared"] == current_best_sequence["cleared"] and new_sequence_data["max_x"] == current_best_sequence["max_x"] and new_sequence_data["score"] > current_best_sequence["score"])
-            if new_is_better:
-                print(f"  Found a new best sequence (Old: X={current_best_sequence['max_x']}, Clr={current_best_sequence['cleared']} | New: X={new_sequence_data['max_x']}, Clr={new_sequence_data['cleared']}). Replacing.")
-                successful_sequences = [new_sequence_data]
-            else:
-                print(f"  Current episode's sequence is not better than the stored best (Stored: X={current_best_sequence['max_x']}, Clr={current_best_sequence['cleared']}). Not updating.")
+            print(f"  Sequence rejected due to low diversity or being inferior.")
         if successful_sequences:
              print(f"    Current best sequence: X={successful_sequences[0]['max_x']}, Cleared={successful_sequences[0]['cleared']}, Len={len(successful_sequences[0]['sequence_with_x'])} frames")
 
@@ -490,7 +614,7 @@ def update_memory_at_episode_end(final_info_dict, episode_frame_by_frame_actions
     print(f"DEBUG update_memory_at_episode_end: overall_best_x_pos after update: {overall_best_x_pos}")
 
 
-def game_loop(env):
+def game_loop(env, stage='1-1'):
     global screen, clock, controller_base_image_scaled, font_small, font_medium
     global successful_sequences, short_term_failure_actions, overall_best_x_pos, a_button_press_time_start
     global info, use_fall_threshold_next_episode, THRESHOLD_NORMAL, THRESHOLD_AFTER_FALL
@@ -542,9 +666,11 @@ def game_loop(env):
         replay_stop_at_x = -1
         if successful_sequences:
             best_seq_data = successful_sequences[0]
-            # ベストXの少し手前から探索に入る
-            replay_stop_at_x = max(0, int(best_seq_data.get('max_x', 0)) - REPLAY_BACKOFF_X)
+            # ベストXの少し手前から探索に入る（±20px のランダム化を追加）
+            backoff_variance = random.randint(-20, 20)
+            replay_stop_at_x = max(0, int(best_seq_data.get('max_x', 0)) - REPLAY_BACKOFF_X + backoff_variance)
             apply_replay_cut_by_x = True
+            print(f"  Replay cutoff at X={replay_stop_at_x} (base={int(best_seq_data.get('max_x', 0)) - REPLAY_BACKOFF_X}, variance={backoff_variance})")
 
 
         apply_special_replay_exit_this_ep = False
@@ -577,8 +703,15 @@ def game_loop(env):
         current_held_action_idx = -1   # INITIAL_ACTION_SET_FOR_ENV でのインデックス
 
         if successful_sequences:
-            best_sequence_data = successful_sequences[0]
-            full_actions_with_x = best_sequence_data["sequence_with_x"]
+            # Top-K リプレイ: ε確率でランダム選択、それ以外は最良選択
+            if random.random() < 0.2:  # 20%の確率でランダム選択
+                selected_sequence_data = random.choice(successful_sequences)
+                print(f"  Random sequence selected from Top-{len(successful_sequences)}: X={selected_sequence_data['max_x']}, Clr={selected_sequence_data['cleared']}")
+            else:
+                selected_sequence_data = successful_sequences[0]
+                print(f"  Best sequence selected: X={selected_sequence_data['max_x']}, Clr={selected_sequence_data['cleared']}")
+            
+            full_actions_with_x = selected_sequence_data["sequence_with_x"]
             num_actual_replay_frames = len(full_actions_with_x) - current_threshold
             if num_actual_replay_frames > 0:
                 is_replaying_sequence = True
@@ -698,7 +831,9 @@ def game_loop(env):
                         boost_mode_remaining -= 1
 
                     # --- バンディット選択: 前回の決定に対する報酬を更新してから、今回の行動を選ぶ ---
-                    update_bandit_from_transition(last_decision_record, current_x_pos_before_action, False, info)
+                    now_t = time.time()
+                    is_currently_stalled = now_t - last_progress_time > STALL_TIME_SEC
+                    update_bandit_from_transition(last_decision_record, current_x_pos_before_action, False, info, previous_x_pos, is_currently_stalled)
                     current_bin = get_x_bin(current_x_pos_before_action)
                     if possible_actions_indices_in_initial_set:
                         current_held_action_idx = choose_action_with_bandit(current_bin, possible_actions_indices_in_initial_set)
@@ -830,7 +965,9 @@ def game_loop(env):
                 else: game_over_text_str = "GAME OVER"
                 
                 # --- 最後の決定の報酬更新（死亡/クリアなどを反映） ---
-                update_bandit_from_transition(last_decision_record, info.get('x_pos', 0), True, info)
+                now_t = time.time()
+                is_currently_stalled = now_t - last_progress_time > STALL_TIME_SEC
+                update_bandit_from_transition(last_decision_record, info.get('x_pos', 0), True, info, previous_x_pos, is_currently_stalled)
                 
                 prev_overall_best = overall_best_x_pos
                 update_memory_at_episode_end(info, episode_frame_by_frame_log, current_episode_max_x, total_episode_reward)
@@ -838,6 +975,10 @@ def game_loop(env):
                     episodes_without_improvement = 0
                 else:
                     episodes_without_improvement += 1
+                
+                # 定期的に統計を保存（100エピソードごと）
+                if episode_count % 100 == 0:
+                    save_stats(stage)
                 game_over_surf = font_medium.render(game_over_text_str, True, (255, 60, 60))
                 text_rect = game_over_surf.get_rect(center=GAME_SCREEN_RECT.center)
                 screen.blit(game_over_surf, text_rect)
@@ -972,6 +1113,13 @@ if __name__ == '__main__':
     # ステージに応じた戦略を設定
     setup_stage_strategy(args.stage)
     
+    # 永続化された統計をロード
+    load_stats(args.stage)
+    
     init_pygame()
     mario_environment = init_mario_env(args.stage)
-    game_loop(mario_environment)
+    try:
+        game_loop(mario_environment, args.stage)
+    finally:
+        # 終了時に統計を保存
+        save_stats(args.stage)

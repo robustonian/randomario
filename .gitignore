@@ -1,3 +1,6 @@
+# Bandit learning statistics (auto-generated)
+bandit_*.json
+
 # Python-generated files
 __pycache__/
 *.py[oc]
