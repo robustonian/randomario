@@ -153,7 +153,7 @@ CONTROLLER_X = GAME_SCREEN_X + GAME_SCREEN_WIDTH + 30
 BACKGROUND_COLOR = (30, 30, 30)
 HIGHLIGHT_COLOR = pygame.Color("yellow")
 FPS = 120
-ACTION_INTERVAL = 1/12
+ACTION_INTERVAL = 1/10
 
 # --- コントローラー画像とボタン定義 (変更なし) ---
 CONTROLLER_IMAGE_PATH = 'fig/famicon01_01.png'
@@ -193,10 +193,10 @@ THRESHOLD_AFTER_FALL = 90
 X_BIN_SIZE = 20                 # Xをこの幅でビン分け
 EPSILON_GREEDY = 0.10           # ε-greedy確率
 UCB_C = 1.2                     # UCBの探索率
-DEATH_PENALTY = 20.0            # 死亡（特に落下）時の追加ペナルティ
+DEATH_PENALTY = 12.0            # 死亡（特に落下）時の追加ペナルティ
 STALL_TIME_SEC = 2.0            # この秒数Xが伸びなければ「停滞」と見なす
-REPLAY_BACKOFF_X = 120          # ベストXからこのpx手前でリプレイを打ち切って探索開始
-BOOST_DECISIONS = 8             # ブーストモードで強気アクションを続ける決定回数
+REPLAY_BACKOFF_X = 80           # ベストXからこのpx手前でリプレイを打ち切って探索開始
+BOOST_DECISIONS = 0             # ブーストモードで強気アクションを続ける決定回数
 BOOST_ACTION_SET = RIGHT_DASH_JUMP_ONLY  # ブースト時のアクション候補
 DECAY = 0.99                     # 指数減衰パラメータ: 環境変化や局所最適からの脱出を促進
 TOP_K_SEQUENCES = 5              # 保存する成功シーケンスの最大数（Top-K）
@@ -343,8 +343,9 @@ def choose_action_with_bandit(bin_id, candidate_indices):
     # UCB1
     best_i, best_score = None, -1e9
     for i in candidate_indices:
-        d = stats.setdefault(i, {'n':0, 'sum':0.0})
-        mean = d['sum'] / max(1, d['n'])
+        d = stats.setdefault(i, {'n':0, 'sum':0.0, 'ema':0.0})
+        # EMA（指数移動平均）を使用し、実試行回数でUCB計算
+        mean = d['ema'] if d['n'] > 0 else 0.0
         ucb = mean + UCB_C * np.sqrt(np.log(total_n) / max(1, d['n']))
         if ucb > best_score:
             best_score = ucb
@@ -376,10 +377,14 @@ def update_bandit_from_transition(prev_decision, curr_x, done, info, prev_x=None
         is_fall = (y >= 250) or (ps == 0x0b)
         reward -= (DEATH_PENALTY if is_fall else DEATH_PENALTY * 0.5)
 
-    d = bandit_stats.setdefault(b, {}).setdefault(a, {'n':0.0, 'sum':0.0})
-    # 指数減衰を適用: 過去の統計に重みを減衰させて新しい報酬を加える
-    d['n'] = d['n'] * DECAY + 1.0
-    d['sum'] = d['sum'] * DECAY + reward
+    d = bandit_stats.setdefault(b, {}).setdefault(a, {'n':0, 'sum':0.0, 'ema':0.0})
+    # 実試行回数は正確にカウント、指数移動平均（EMA）は別途管理
+    d['n'] += 1
+    if d['n'] == 1:
+        d['ema'] = reward
+    else:
+        d['ema'] = d['ema'] * DECAY + reward * (1.0 - DECAY)
+    d['sum'] += reward  # デバッグ用に累計も保持
 
 def calculate_sequence_diversity(seq1, seq2, max_length_for_comparison=100):
     """
@@ -458,9 +463,15 @@ def load_stats(stage):
             print(f"WARNING: Stats file is for stage {data.get('stage')}, not {stage}. Ignoring.")
             return
         
-        # 統計をロード
+        # 統計をロード（JSONでキーが文字列になるためintに戻す）
         bandit_stats.clear()
-        bandit_stats.update(data.get('bandit', {}))
+        raw_bandit = data.get('bandit', {})
+        for x_bin_str, actions_dict in raw_bandit.items():
+            x_bin = int(x_bin_str)
+            bandit_stats[x_bin] = {}
+            for action_str, stats in actions_dict.items():
+                action_idx = int(action_str)
+                bandit_stats[x_bin][action_idx] = stats
         
         # 成功シーケンスをロード
         successful_sequences.clear()
@@ -678,8 +689,8 @@ def game_loop(env, stage='1-1'):
         replay_stop_at_x = -1
         if successful_sequences:
             best_seq_data = successful_sequences[0]
-            # ベストXの少し手前から探索に入る（±20px のランダム化を追加）
-            backoff_variance = random.randint(-20, 20)
+            # ベストXの少し手前から探索に入る（±10px のランダム化を追加）
+            backoff_variance = random.randint(-10, 10)
             replay_stop_at_x = max(0, int(best_seq_data.get('max_x', 0)) - REPLAY_BACKOFF_X + backoff_variance)
             apply_replay_cut_by_x = True
             print(f"  Replay cutoff at X={replay_stop_at_x} (base={int(best_seq_data.get('max_x', 0)) - REPLAY_BACKOFF_X}, variance={backoff_variance})")
@@ -1097,13 +1108,17 @@ def apply_learning_parameters(args):
         # 完全ランダム（元の挙動）モード
         EPSILON_GREEDY = 1.0          # 常に一様ランダム
         UCB_C = 0.0                   # UCB無効化（使われなくなる）
-        REPLAY_BACKOFF_X = -1         # X座標リプレイ打ち切り無効化
+        REPLAY_BACKOFF_X = -1         # X座標リプレイ打ち切り無効化（ただし成功シーケンスクリアで無効化）
         STALL_TIME_SEC = 1e9          # 停滞検出を実質無効化
         BOOST_DECISIONS = 0           # ブースト無効化
         DEATH_PENALTY = 0.0           # 死亡ペナルティ無効化
         X_BIN_SIZE = args.x_bin_size  # 念のため維持（実質使われない）
+        # ランダムモードでは統計と成功シーケンスを完全にクリア
+        bandit_stats.clear()
+        successful_sequences.clear()
         print("RANDOM MODE: All learning features disabled (equivalent to original behavior)")
         print(f"Random Parameters: epsilon={EPSILON_GREEDY}, replay_backoff={REPLAY_BACKOFF_X}, stall_time={STALL_TIME_SEC}, boost_decisions={BOOST_DECISIONS}")
+        print("DEBUG: Cleared all learning statistics and successful sequences for pure random mode")
     else:
         # バンディット学習モード（デフォルト）
         X_BIN_SIZE = args.x_bin_size
@@ -1125,8 +1140,9 @@ if __name__ == '__main__':
     # ステージに応じた戦略を設定
     setup_stage_strategy(args.stage)
     
-    # 永続化された統計をロード
-    load_stats(args.stage)
+    # 永続化された統計をロード（ランダムモード時は除く）
+    if not args.random:
+        load_stats(args.stage)
     
     init_pygame()
     mario_environment = init_mario_env(args.stage)
