@@ -419,12 +419,24 @@ def calculate_sequence_diversity(seq1, seq2, max_length_for_comparison=100):
     
     return dp[m][n]
 
+def convert_numpy_types(obj):
+    """numpy型をPython標準型に変換するヘルパー関数"""
+    if hasattr(obj, 'item'):
+        return obj.item()  # numpy scalar to python scalar
+    elif isinstance(obj, dict):
+        return {k: convert_numpy_types(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_types(v) for v in obj]
+    else:
+        return obj
+
 def save_stats(stage):
     """バンディット統計と成功シーケンスをステージごとにJSONファイルに保存"""
     try:
+        # numpy型をPython標準型に変換
         data = {
-            'bandit': bandit_stats,
-            'sequences': successful_sequences,
+            'bandit': convert_numpy_types(bandit_stats),
+            'sequences': convert_numpy_types(successful_sequences),
             'stage': stage
         }
         filename = f'bandit_{stage.replace("-", "_")}.json'
@@ -719,7 +731,7 @@ def game_loop(env, stage='1-1'):
                 replay_pointer = 0
                 num_frames_to_replay_in_current_segment = num_actual_replay_frames
                 print(f"Ep {episode_count}: Starting in REPLAY mode. Full seq len: {len(full_actions_with_x)}, Replaying first {num_frames_to_replay_in_current_segment} frames (Threshold: {current_threshold}).")
-                print(f"  Replay target X from sequence (original stored max_x): {best_sequence_data['max_x']}, Cleared: {best_sequence_data['cleared']}")
+                print(f"  Replay target X from sequence (original stored max_x): {selected_sequence_data['max_x']}, Cleared: {selected_sequence_data['cleared']}")
             else:
                 is_replaying_sequence = False
                 print(f"Ep {episode_count}: Starting in EXPLORE mode (Replay segment too short or zero: {num_actual_replay_frames}. Full seq len: {len(full_actions_with_x)}, Threshold: {current_threshold}).")
