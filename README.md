@@ -120,6 +120,7 @@ randomario/
 ├── fig/
 │   └── famicon01_01.png       # ファミコンコントローラーの画像ファイル
 ├── main.py                   # メインスクリプト（バンディット学習AI実装）
+├── test.py                   # Go-Explore風のテスト実装（別アプローチ）
 ├── CLAUDE.md                 # Claude Code用開発ガイド
 ├── pyproject.toml             # プロジェクトの設定および主要な依存関係定義ファイル
 ├── uv.lock                    # 依存関係のバージョンを固定するロックファイル

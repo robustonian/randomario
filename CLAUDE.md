@@ -8,9 +8,10 @@ RandoMario is a Super Mario Bros. automation project built in Python that uses O
 
 ## Core Architecture
 
-### Single-File Design
-- **Main Entry Point**: `main.py` - Contains the entire application logic in one file (~1000+ lines)
-- The codebase follows a monolithic structure where all functionality is contained in the main script
+### Core Files
+- **Main Entry Point**: `main.py` - Contains the entire bandit learning application logic (~1000+ lines)
+- **Test Implementation**: `test.py` - Alternative Go-Explore style Mario agent with UI integration (~600+ lines)
+- The main codebase follows a monolithic structure with all functionality in single files
 
 ### Key Components in main.py:
 - **Command Line Interface**: Stage selection via `--stage` or `-s` arguments (e.g., 1-1, 2-1, 4-1, 8-4)
@@ -71,6 +72,25 @@ The codebase uses a sophisticated action switching system with statistical learn
 
 The system automatically selects the appropriate strategy based on the specified stage and optimizes action selection through statistical learning.
 
+### Key Components in test.py:
+- **Go-Explore Algorithm**: Cell-based archive system for systematic exploration
+- **Cell Archive**: Discretizes game states into (x_bin, y_bin, status) cells with path storage
+- **Return-then-Explore**: Two-phase approach - return to promising cells, then explore from there
+- **Heuristic Action Sampling**: Probabilistic action selection with jump/dash/movement patterns
+- **Archive Persistence**: Saves/loads exploration progress using pickle format
+- **Real-time UI**: Same controller visualization system as main.py
+
+**Archive System:**
+- `Cell`: Dataclass storing cell_id, path sequence, max_x reached, visit count
+- `_select_start_cell_path()`: Weighted selection of promising cells based on max_x and visit frequency
+- `_maybe_add_or_update_cell()`: Updates archive with better paths or higher x-progress
+
+**Exploration Heuristics:**
+- `down_press_prob`: 2% chance to press down (for pipes/secret areas)
+- `left_adjust_prob`: 5% chance for left movement (position adjustment)
+- `jump_start_prob`: 12% chance to start jump sequence (6-14 frame holds)
+- Main action: right dash for forward progress
+
 ## Development Commands
 
 ### Setup and Installation
@@ -91,6 +111,11 @@ uv run main.py -s 1-1       # Uses default strategy
 uv run main.py --stage 7-4 --x-bin-size 10 --death-penalty 40      # Fine-grained learning
 uv run main.py --stage 4-4 --replay-backoff 160 --epsilon 0.15     # High diversity exploration
 uv run main.py --stage 1-1 --stall-time 1.5 --ucb-c 1.8          # Aggressive stall detection
+
+# Run the Go-Explore test implementation
+uv run test.py --stage 1-1 --episodes 1000                         # Basic Go-Explore run
+uv run test.py --stage 4-2 --actions complex --archive ./4-2.pkl   # Complex actions with archive
+uv run test.py --fps 120 --max-steps 8000                          # High FPS with extended episodes
 
 # Use original random behavior (disable all learning)
 uv run main.py --stage 1-1 --random                               # Pure random action selection
