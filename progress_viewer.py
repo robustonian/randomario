@@ -93,18 +93,16 @@ class ProgressData:
         if not self.exists:
             return "-"
         elif self.first_clear_episode is not None:
-            return f"Cleared\nEP{self.first_clear_episode}"
+            return f"✅EP{self.first_clear_episode}"
         else:
-            return f"Playing\nEP{self.episodes_done}"
+            return f"🔄EP{self.episodes_done}"
 
     @property
     def status_icon(self) -> str:
         if not self.exists:
             return "⚫"  # Not attempted
-        elif self.first_clear_episode is not None:
-            return "✅"  # Cleared
         else:
-            return "🔄"  # In progress
+            return ""  # No separate icon needed, it's in status_text
 
     @property
     def bg_color(self) -> str:
@@ -129,7 +127,7 @@ class ProgressViewerGUI:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("🍄 Mario Progress Dashboard")
-        self.root.geometry("900x400")
+        self.root.geometry("900x450")
         self.root.configure(bg='#2c3e50')
         self.root.resizable(True, False)
         
@@ -188,18 +186,13 @@ class ProgressViewerGUI:
                 world_frame.rowconfigure(stage-1, weight=1)
                 world_frame.columnconfigure(0, weight=1)
                 
-                # Stage label with compact layout
-                stage_label = tk.Label(stage_frame, text=f"{world}-{stage}", 
-                                     font=('Segoe UI', 8, 'bold'),
-                                     bg='#34495e', fg='#ecf0f1', pady=1)
-                stage_label.pack()
-                
-                # Status label (icon + text) with better styling
-                status_label = tk.Label(stage_frame, text="⚫\n-", 
-                                      font=('Segoe UI', 7),
+                # Single combined label with larger, more readable text
+                combined_text = f"{world}-{stage}\n⚫-"
+                status_label = tk.Label(stage_frame, text=combined_text,
+                                      font=('Segoe UI', 12, 'bold'),
                                       bg='#34495e', fg='#bdc3c7', 
-                                      pady=2, justify='center')
-                status_label.pack()
+                                      pady=5, justify='center')
+                status_label.pack(expand=True, fill='both')
                 
                 self.labels[stage_key] = status_label
         
@@ -267,7 +260,12 @@ class ProgressViewerGUI:
         for stage_key, progress in self.progress_data.items():
             if stage_key in self.labels:
                 label = self.labels[stage_key]
-                text = f"{progress.status_icon}\n{progress.status_text}"
+                
+                # Combined text: stage name and status on separate lines
+                if progress.status_icon:  # For not attempted (⚫)
+                    text = f"{stage_key}\n{progress.status_icon}{progress.status_text}"
+                else:  # For playing/cleared (has emoji in status_text)
+                    text = f"{stage_key}\n{progress.status_text}"
                 
                 # Update label with new colors and text
                 label.config(text=text, 
