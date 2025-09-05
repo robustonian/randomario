@@ -119,6 +119,8 @@ uv run main.py --help
 randomario/
 ├── fig/
 │   └── famicon01_01.png       # ファミコンコントローラーの画像ファイル
+├── pkl/                       # Go-Exploreアーカイブファイル格納ディレクトリ
+│   └── *.pkl                  # 学習進捗保存ファイル（自動生成）
 ├── main.py                   # メインスクリプト（バンディット学習AI実装）
 ├── test.py                   # Go-Explore風のテスト実装（別アプローチ）
 ├── CLAUDE.md                 # Claude Code用開発ガイド

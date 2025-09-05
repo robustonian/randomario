@@ -273,6 +273,7 @@ class GoExploreUIRunner:
         self.best_overall_x: int = 0
         self.best_overall_path: List[int] = []
         self.episodes_done: int = 0
+        self.first_clear_episode: Optional[int] = None  # Episode number of first stage clear
 
         # Replay/Explore control
         self.current_plan: List[int] = []  # Current replay plan (return to cell)
@@ -325,8 +326,9 @@ class GoExploreUIRunner:
         flag = bool(self.last_info.get('flag_get', False))
         mode_str = "REPLAY" if self.mode == "replay" else "EXPLORE"
 
+        clear_status = f"FirstClear: {self.first_clear_episode}" if self.first_clear_episode else "FirstClear: None"
         info_lines = [
-            f"Stage: {self.stage} | Mode: {mode_str}",
+            f"Stage: {self.stage} | Mode: {mode_str} | {clear_status}",
             f"Ep: {self.episodes_done} | BestX: {self.best_overall_x} | Cells: {len(self.archive)}",
             f"EpMaxX: {self.ep_max_x} | CurrX: {x} | Time: {time_left} | Flag: {flag}",
             f"PlanLen: {len(self.current_plan)} | PlanPtr: {self.plan_ptr} | ExploreLeft: {self.explore_steps_left}",
@@ -349,7 +351,11 @@ class GoExploreUIRunner:
                 self.archive = data.get("archive", {})
                 self.best_overall_x = data.get("best_overall_x", 0)
                 self.best_overall_path = data.get("best_overall_path", [])
-                print(f"[INFO] Loaded archive: {len(self.archive)} cells, best_x={self.best_overall_x} from {self.archive_path}")
+                self.episodes_done = data.get("episodes_done", 0)
+                self.first_clear_episode = data.get("first_clear_episode", None)
+                
+                clear_info = f", first_clear_ep={self.first_clear_episode}" if self.first_clear_episode else ", not_cleared_yet"
+                print(f"[INFO] Loaded archive: {len(self.archive)} cells, best_x={self.best_overall_x}, episodes_done={self.episodes_done}{clear_info} from {self.archive_path}")
             except Exception as e:
                 print(f"[WARN] Failed to load archive from {self.archive_path}: {e}")
 
@@ -360,6 +366,8 @@ class GoExploreUIRunner:
             "archive": self.archive,
             "best_overall_x": self.best_overall_x,
             "best_overall_path": self.best_overall_path,
+            "episodes_done": self.episodes_done,
+            "first_clear_episode": self.first_clear_episode,
             "stage": self.stage,
             "updated_at": time.time(),
         }
@@ -368,7 +376,8 @@ class GoExploreUIRunner:
             with open(tmp_path, "wb") as f:
                 pickle.dump(data, f)
             os.replace(tmp_path, self.archive_path)
-            print(f"[INFO] Archive saved to {self.archive_path} (cells={len(self.archive)}, best_x={self.best_overall_x})")
+            clear_info = f", first_clear_ep={self.first_clear_episode}" if self.first_clear_episode else ""
+            print(f"[INFO] Archive saved to {self.archive_path} (cells={len(self.archive)}, best_x={self.best_overall_x}, episodes_done={self.episodes_done}{clear_info})")
         except Exception as e:
             print(f"[WARN] Failed to save archive: {e}")
 
@@ -537,6 +546,10 @@ class GoExploreUIRunner:
                 cleared = bool(info.get('flag_get', False))
                 if cleared:
                     reason = "STAGE CLEAR"
+                    # Record first clear episode if not already recorded
+                    if self.first_clear_episode is None:
+                        self.first_clear_episode = self.episodes_done
+                        print(f"[MILESTONE] First stage clear achieved at episode {self.first_clear_episode}!")
                 elif int(info.get('time', 400)) <= 1:
                     reason = "TIME UP"
                 else:
@@ -578,7 +591,7 @@ def main():
     parser = argparse.ArgumentParser(description="Go-Explore style Mario with Pygame UI")
     parser.add_argument("--stage", "-s", type=str, default="1-1", help="Stage like 1-1, 2-1, 4-2, 8-4, etc.")
     parser.add_argument("--episodes", "-e", type=int, default=1000, help="Max episodes to run")
-    parser.add_argument("--archive", "-a", type=str, default=None, help="Path to save/load archive (e.g., ./mario_ge_ui_1-1.pkl)")
+    parser.add_argument("--archive", "-a", type=str, default=None, help="Path to save/load archive (default: pkl/go_explore_archive_{stage}_{actions}.pkl)")
     parser.add_argument("--actions", type=str, default="right_only", choices=["right_only", "simple", "complex"], help="Action set to use")
     parser.add_argument("--seed", type=int, default=None, help="Random seed")
     parser.add_argument("--fps", type=int, default=60, help="Target FPS for UI")
@@ -586,7 +599,11 @@ def main():
     parser.add_argument("--explore-steps", type=int, default=1200, help="Explore steps after replay")
     args = parser.parse_args()
 
-    archive_path = args.archive or f"./go_explore_archive_{args.stage}_{args.actions}.pkl"
+    # Create pkl directory if it doesn't exist
+    pkl_dir = "pkl"
+    os.makedirs(pkl_dir, exist_ok=True)
+    
+    archive_path = args.archive or f"{pkl_dir}/go_explore_archive_{args.stage}_{args.actions}.pkl"
     actions = ACTION_SETS[args.actions]
 
     print(f"Using action set '{args.actions}' with {len(actions)} actions:")

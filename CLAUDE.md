@@ -113,9 +113,9 @@ uv run main.py --stage 4-4 --replay-backoff 160 --epsilon 0.15     # High divers
 uv run main.py --stage 1-1 --stall-time 1.5 --ucb-c 1.8          # Aggressive stall detection
 
 # Run the Go-Explore test implementation
-uv run test.py --stage 1-1 --episodes 1000                         # Basic Go-Explore run
-uv run test.py --stage 4-2 --actions complex --archive ./4-2.pkl   # Complex actions with archive
-uv run test.py --fps 120 --max-steps 8000                          # High FPS with extended episodes
+uv run test.py --stage 1-1 --episodes 1000                            # Basic Go-Explore run (saves to pkl/)
+uv run test.py --stage 4-2 --actions complex --archive pkl/4-2.pkl    # Complex actions with custom archive
+uv run test.py --fps 120 --max-steps 8000                             # High FPS with extended episodes
 
 # Use original random behavior (disable all learning)
 uv run main.py --stage 1-1 --random                               # Pure random action selection
