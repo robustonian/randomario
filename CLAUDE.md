@@ -11,6 +11,7 @@ RandoMario is a Super Mario Bros. automation project built in Python that uses O
 ### Core Files
 - **Main Entry Point**: `main.py` - Contains the entire bandit learning application logic (~1000+ lines)
 - **Test Implementation**: `test.py` - Alternative Go-Explore style Mario agent with UI integration (~600+ lines)
+- **Progress Dashboard**: `progress_viewer.py` - GUI dashboard for monitoring stage completion status (~350+ lines)
 - The main codebase follows a monolithic structure with all functionality in single files
 
 ### Key Components in main.py:
@@ -91,6 +92,22 @@ The system automatically selects the appropriate strategy based on the specified
 - `jump_start_prob`: 12% chance to start jump sequence (6-14 frame holds)
 - Main action: right dash for forward progress
 
+### Key Components in progress_viewer.py:
+- **Real-time Monitoring**: Automatic file watching with 2-second intervals to detect pkl changes
+- **GUI Dashboard**: Tkinter-based 4×8 matrix showing all stages (1-1 through 8-4)
+- **Status Visualization**: Color-coded progress indicators with episode tracking
+  - ✅ Green: Stage cleared (shows first clear episode)
+  - 🔄 Orange: Stage in progress (shows current episode)
+  - ⚫ Gray: Stage not attempted
+- **Dark Theme UI**: Modern design with Segoe UI fonts and professional color scheme
+- **Error Handling**: Robust pickle loading with fallback mechanisms for corrupted files
+
+**Technical Features:**
+- `ProgressData`: Class managing individual stage data with modification tracking
+- `ProgressViewerGUI`: Main GUI class with threading for file monitoring
+- Automatic pkl/ directory scanning with multi-action-set support
+- Background monitoring thread with graceful shutdown handling
+
 ## Development Commands
 
 ### Setup and Installation
@@ -119,6 +136,9 @@ uv run test.py --fps 120 --max-steps 8000                             # High FPS
 
 # Use original random behavior (disable all learning)
 uv run main.py --stage 1-1 --random                               # Pure random action selection
+
+# Monitor progress across all stages
+python progress_viewer.py                                         # Launch progress dashboard GUI
 
 # Show help for command line options (includes parameter ranges)
 uv run main.py --help
