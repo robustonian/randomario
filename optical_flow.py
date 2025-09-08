@@ -126,37 +126,50 @@ class FlowBasedTracker:
         # Other objects
         self.objects = []  # List of {bbox, v_screen, v_world}
         
-        # Flow parameters (optimized for NES Mario)
+        # Flow parameters (enhanced for better moving object detection)
         self.flow_params = {
             'pyr_scale': 0.5,
-            'levels': 3,
-            'winsize': 15,
-            'iterations': 3,
-            'poly_n': 5,
-            'poly_sigma': 1.2,
-            'flags': 0
+            'levels': 4,           # Increased for better slow motion capture
+            'winsize': 21,         # Larger window for small/slow movements
+            'iterations': 5,       # More iterations for accuracy
+            'poly_n': 7,          # Higher polynomial degree
+            'poly_sigma': 1.5,    # Larger gaussian window
+            'flags': cv2.OPTFLOW_FARNEBACK_GAUSSIAN
         }
         
-        # Motion detection thresholds
-        self.motion_threshold_percentile = 92
-        self.motion_threshold_multiplier = 0.6
-        self.min_component_area = 20
-        self.min_component_size = 4
-        self.max_component_size = 64
+        # Motion detection thresholds (improved sensitivity)
+        self.motion_threshold_percentile = 85  # More sensitive to slow motion
+        self.motion_threshold_multiplier = 0.7
+        self.min_component_area = 12           # Allow smaller objects
+        self.min_component_size = 3
+        self.max_component_size = 80
+        
+        # Camera tracking with improved stability
+        self.ema_alpha = 0.15  # Reduced for more stability
         
         # Mario detection parameters
         self.mario_sprite_size = (18, 28)  # Approximate Mario sprite size
         self.mario_initial_x_bias = 100  # Prefer left side of screen initially
         
-    def _estimate_camera_flow(self, flow):
-        """Estimate camera movement from background flow, excluding HUD area."""
+    def _estimate_camera_flow(self, flow, mario_bbox=None):
+        """Estimate camera movement from background flow, excluding HUD area and Mario vicinity."""
         H, W, _ = flow.shape
         
         # Create mask to exclude HUD (top portion of screen)
         mask = np.zeros((H, W), dtype=np.uint8)
         mask[self.hud_height:, :] = 1
         
-        # Extract flow vectors from non-HUD region
+        # Exclude Mario vicinity to avoid contamination
+        if mario_bbox is not None:
+            mx, my, mw, mh = mario_bbox
+            margin = 12
+            x0 = max(0, mx - margin)
+            x1 = min(W, mx + mw + margin)
+            y0 = max(0, my - margin)
+            y1 = min(H, my + mh + margin)
+            mask[y0:y1, x0:x1] = 0
+        
+        # Extract flow vectors from valid regions
         fx = flow[..., 0][mask > 0]
         fy = flow[..., 1][mask > 0]
         
@@ -166,6 +179,9 @@ class FlowBasedTracker:
         # Use median for robust estimation (resistant to outliers)
         vx = np.median(fx)
         vy = np.median(fy)
+        
+        # Clamp vertical velocity for horizontal scrolling games
+        vy = np.clip(vy, -0.2, 0.2)
         
         # Apply exponential moving average for temporal stability
         self.cam_vx_ema = (1 - self.ema_alpha) * self.cam_vx_ema + self.ema_alpha * vx
@@ -183,8 +199,10 @@ class FlowBasedTracker:
         # Calculate magnitude of residual flow
         magnitude = np.linalg.norm(residual, axis=2)
         
-        # Adaptive threshold based on flow distribution
-        threshold = max(1.2, np.percentile(magnitude, self.motion_threshold_percentile) * self.motion_threshold_multiplier)
+        # Use MAD (Median Absolute Deviation) for robust adaptive threshold
+        med = np.median(magnitude)
+        mad = 1.4826 * np.median(np.abs(magnitude - med))  # Scale factor for normal distribution
+        threshold = max(0.4, med + 2.5 * mad)  # Lower minimum threshold, robust outlier detection
         
         # Create binary mask for moving regions
         mask = (magnitude > threshold).astype(np.uint8) * 255
@@ -192,10 +210,10 @@ class FlowBasedTracker:
         # Exclude HUD area
         mask[:self.hud_height, :] = 0
         
-        # Morphological operations to clean up the mask
+        # Morphological operations to clean up the mask (reduced opening for small objects)
         kernel = np.ones((3, 3), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_DILATE, kernel, iterations=1)
+        # Skip MORPH_OPEN to preserve small moving objects
+        mask = cv2.morphologyEx(mask, cv2.MORPH_DILATE, kernel, iterations=2)
         
         return mask, residual
     
@@ -273,6 +291,61 @@ class FlowBasedTracker:
             
             return best_component
     
+    def _static_wall_ahead(self, gray, mario_bbox):
+        """Detect static walls/obstacles ahead of Mario using edge density analysis."""
+        if mario_bbox is None:
+            return False
+        
+        H, W = gray.shape
+        x, y, w, h = mario_bbox
+        
+        # Define region ahead of Mario at foot level
+        rx0 = min(W-1, x + w + 8)      # Start 8px ahead of Mario
+        rx1 = min(W, x + w + 56)       # Extend 56px forward
+        ry0 = max(0, y + h - 10)       # 10px above Mario's bottom
+        ry1 = min(H, y + h + 4)        # 4px below Mario's bottom
+        
+        roi = gray[ry0:ry1, rx0:rx1]
+        if roi.size == 0:
+            return False
+            
+        # Apply Gaussian blur to reduce noise, then edge detection
+        roi_blur = cv2.GaussianBlur(roi, (3, 3), 0)
+        edges = cv2.Canny(roi_blur, 40, 120)
+        
+        # Check for strong vertical edges (walls, pipes)
+        col_sums = edges.sum(axis=0) / 255.0
+        max_vertical_edge = col_sums.max() if col_sums.size > 0 else 0
+        
+        return max_vertical_edge >= 6  # Strong vertical edge indicates wall
+    
+    def _gap_ahead(self, gray, mario_bbox):
+        """Detect gaps/holes ahead of Mario using texture/edge density analysis."""
+        if mario_bbox is None:
+            return False
+            
+        H, W = gray.shape
+        x, y, w, h = mario_bbox
+        
+        # Define region below Mario's feet, looking ahead
+        rx0 = min(W-1, x + w + 8)      # Start 8px ahead of Mario
+        rx1 = min(W, x + w + 56)       # Extend 56px forward
+        by0 = min(H-1, y + h + 2)      # Just below Mario's feet
+        by1 = min(H, y + h + 14)       # Look down 14px
+        
+        roi = gray[by0:by1, rx0:rx1]
+        if roi.size == 0:
+            return False
+            
+        # Apply blur and edge detection
+        roi_blur = cv2.GaussianBlur(roi, (3, 3), 0)
+        edges = cv2.Canny(roi_blur, 30, 100)
+        
+        # Calculate edge density - low density suggests empty space (gap)
+        edge_density = edges.sum() / 255.0 / max(1, roi.size)
+        
+        return edge_density < 0.02  # Very low edge density indicates gap
+    
     def update(self, frame_rgb):
         """
         Process a new frame and return tracking results.
@@ -308,8 +381,8 @@ class FlowBasedTracker:
             self.prev_gray, gray, None, **self.flow_params
         )
         
-        # Estimate camera movement
-        cam_vx, cam_vy = self._estimate_camera_flow(flow)
+        # Estimate camera movement (pass previous Mario bbox to avoid contamination)
+        cam_vx, cam_vy = self._estimate_camera_flow(flow, self.mario_bbox)
         
         # Update cumulative camera position
         self.cam_x += cam_vx
@@ -375,6 +448,10 @@ class FlowBasedTracker:
         # Update result with camera info
         result["camera_v"] = (cam_vx, cam_vy)
         result["camera_xy"] = (self.cam_x, self.cam_y)
+        
+        # Add static obstacle detection
+        result["static_wall_ahead"] = self._static_wall_ahead(gray, mario_bbox)
+        result["gap_ahead"] = self._gap_ahead(gray, mario_bbox)
         
         # Store current frame for next iteration
         self.prev_gray = gray
@@ -451,22 +528,31 @@ class FlowHeuristicPolicy:
         self.last_bottom_y = bottom_y
         return self.ground_frames >= 2
 
-    def _obstacle_ahead(self, mario, objects):
-        if not mario:
-            return False
-        mx, my, mw, mh = mario['bbox']
-        right_edge = mx + mw
-        for obj in objects:
-            ox, oy, ow, oh = obj['bbox']
-            ocx = ox + ow / 2
-            dx = ocx - right_edge
-            if dx < self.obstacle_dx[0] or dx > self.obstacle_dx[1]:
-                continue
-            # 足元付近に重なるもの（地上の敵・ファイアバー等の一部）
-            if not (oy < my + mh and oy + oh > my + mh - self.obstacle_dy_tol):
-                continue
-            return True
-        return False
+    def _obstacle_ahead(self, mario, objects, flow_estimates):
+        """Detect obstacles ahead using both moving objects and static detection."""
+        moving_obstacle = False
+        
+        if mario:
+            # Check for moving objects near Mario
+            mx, my, mw, mh = mario['bbox']
+            right_edge = mx + mw
+            for obj in objects:
+                ox, oy, ow, oh = obj['bbox']
+                ocx = ox + ow / 2
+                dx = ocx - right_edge
+                if dx < self.obstacle_dx[0] or dx > self.obstacle_dx[1]:
+                    continue
+                # 足元付近に重なるもの（地上の敵・ファイアバー等の一部）
+                if not (oy < my + mh and oy + oh > my + mh - self.obstacle_dy_tol):
+                    continue
+                moving_obstacle = True
+                break
+        
+        # Check for static obstacles (walls, pipes, gaps)
+        static_wall = bool(flow_estimates.get("static_wall_ahead", False))
+        gap = bool(flow_estimates.get("gap_ahead", False))
+        
+        return moving_obstacle or static_wall or gap
 
     def decide(self, flow_estimates):
         # Marioが見つからない場合は、右ダッシュ前進
@@ -495,7 +581,7 @@ class FlowHeuristicPolicy:
             return self._right_jump()
 
         # 障害物や減速兆候でジャンプ開始
-        obstacle = self._obstacle_ahead(mario, objects)
+        obstacle = self._obstacle_ahead(mario, objects, flow_estimates)
         if on_ground and (obstacle or vx < self.vx_slow or self.stuck_frames > self.stuck_limit):
             # 速度に応じて保持時間を調整（速いほど長めに）
             hold = int(self.min_jump_hold + (self.max_jump_hold - self.min_jump_hold) * max(0.0, min(1.0, vx / 2.5)))
