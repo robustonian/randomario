@@ -381,6 +381,136 @@ class FlowBasedTracker:
         
         return result
 
+class FlowHeuristicPolicy:
+    """
+    Optical Flowベースの簡易ヒューリスティック戦略。
+    既定は右ダッシュ、障害物/減速/落下兆候でジャンプを開始し、保持時間を調整します。
+    アクションセットに応じて可能な最良の組み合わせを選びます。
+    """
+    def __init__(self, actions, action_indices, target_fps=60):
+        self.actions = actions
+        self.a = action_indices
+        self.dt = 1.0 / max(1, target_fps)
+        # 内部状態
+        self.jump_hold = 0
+        self.ground_frames = 0
+        self.last_bottom_y = None
+        self.stuck_frames = 0
+
+        # 閾値
+        self.vx_slow = 0.5       # v_world_x がこの値未満だと減速/詰まり傾向
+        self.fall_vy = 0.6       # v_world_y がこの値より大きい（下向き）と落下中
+        self.obstacle_dx = (10, 48)  # マリオの右端から前方 dx 範囲を障害物候補
+        self.obstacle_dy_tol = 10    # 足元高さの重なり許容
+        self.min_jump_hold = 6
+        self.max_jump_hold = 14
+        self.stuck_limit = 120    # 連続フレーム数（~2.0秒）で詰まり判定
+
+    def reset(self):
+        self.jump_hold = 0
+        self.ground_frames = 0
+        self.last_bottom_y = None
+        self.stuck_frames = 0
+
+    def _best(self, labels):
+        # 与えた候補ラベル列から、利用可能な最初のものを返す
+        for lab in labels:
+            if lab in self.a:
+                return self.a[lab]
+        # 最終フォールバック
+        return self.a.get('RIGHT', self.a.get('NOOP', 0))
+
+    def _right(self):
+        return self._best(['RIGHT_DASH', 'RIGHT'])
+
+    def _right_jump(self):
+        return self._best(['RIGHT_DASH_JUMP', 'RIGHT_JUMP', 'JUMP', 'RIGHT'])
+
+    def _left(self):
+        return self._best(['LEFT', 'RIGHT'])  # 無ければ右
+
+    def _left_jump(self):
+        return self._best(['LEFT_JUMP', 'JUMP', 'LEFT', 'RIGHT'])
+
+    def _noop(self):
+        return self._best(['NOOP'])
+
+    def _on_ground_update(self, mario):
+        # 簡易な接地判定：ボトムYが安定かつ垂直速度が小さい
+        if not mario:
+            self.ground_frames = 0
+            self.last_bottom_y = None
+            return False
+        x, y, w, h = mario['bbox']
+        bottom_y = y + h
+        vy = mario['v_world'][1]
+        if self.last_bottom_y is not None and abs(bottom_y - self.last_bottom_y) <= 1 and abs(vy) < 0.3:
+            self.ground_frames += 1
+        else:
+            self.ground_frames = 0
+        self.last_bottom_y = bottom_y
+        return self.ground_frames >= 2
+
+    def _obstacle_ahead(self, mario, objects):
+        if not mario:
+            return False
+        mx, my, mw, mh = mario['bbox']
+        right_edge = mx + mw
+        for obj in objects:
+            ox, oy, ow, oh = obj['bbox']
+            ocx = ox + ow / 2
+            dx = ocx - right_edge
+            if dx < self.obstacle_dx[0] or dx > self.obstacle_dx[1]:
+                continue
+            # 足元付近に重なるもの（地上の敵・ファイアバー等の一部）
+            if not (oy < my + mh and oy + oh > my + mh - self.obstacle_dy_tol):
+                continue
+            return True
+        return False
+
+    def decide(self, flow_estimates):
+        # Marioが見つからない場合は、右ダッシュ前進
+        mario = flow_estimates.get('mario')
+        objects = flow_estimates.get('objects', [])
+        # 既にジャンプ保持中なら継続
+        if self.jump_hold > 0:
+            self.jump_hold -= 1
+            return self._right_jump()
+
+        if not mario:
+            return self._right()
+
+        vx, vy = mario['v_world']
+        on_ground = self._on_ground_update(mario)
+
+        # 詰まり検出（ほぼ前進していない）
+        if abs(vx) < 0.2 and on_ground:
+            self.stuck_frames += 1
+        else:
+            self.stuck_frames = 0
+
+        # 落下中ならジャンプボタンを追加保持（滞空延長）
+        if not on_ground and vy > self.fall_vy:
+            self.jump_hold = max(self.jump_hold, 4)
+            return self._right_jump()
+
+        # 障害物や減速兆候でジャンプ開始
+        obstacle = self._obstacle_ahead(mario, objects)
+        if on_ground and (obstacle or vx < self.vx_slow or self.stuck_frames > self.stuck_limit):
+            # 速度に応じて保持時間を調整（速いほど長めに）
+            hold = int(self.min_jump_hold + (self.max_jump_hold - self.min_jump_hold) * max(0.0, min(1.0, vx / 2.5)))
+            self.jump_hold = max(self.jump_hold, hold)
+            self.stuck_frames = 0
+            return self._right_jump()
+
+        # たまに段差で引っかかる場合の微調整（空中で右ジャンプ継続、接地で稀に左微調整）
+        if on_ground and vx < 0.25 and not obstacle:
+            # ほんの少し左に戻って体勢立て直し（アクションが無い場合は単に右）
+            return self._left() if 'LEFT' in self.a else self._right()
+
+        # 既定は右ダッシュで前進
+        return self._right()
+
 # UI constants
 SCREEN_WIDTH = 1024
 SCREEN_HEIGHT = 640
@@ -597,6 +727,8 @@ class GoExploreUIRunner:
         # Optical flow tracker
         self.flow_tracker = FlowBasedTracker(fps=target_fps, hud_height=40)
         self.last_flow_estimates = {}
+        # Flow-based policy
+        self.flow_policy = FlowHeuristicPolicy(self.actions, self.action_indices, target_fps)
 
         # UI
         self._init_pygame()
@@ -837,6 +969,9 @@ class GoExploreUIRunner:
         self.last_frame = obs
         self.last_info = info
         self.ep_max_x = max(self.ep_max_x, int(info.get('x_pos', 0)))
+        
+        # Reset policy state
+        self.flow_policy.reset()
 
     def _end_episode(self, reason: str):
         print(f"[EP] End: {reason} | ep={self.episodes_done} | ep_max_x={self.ep_max_x} | best_x={self.best_overall_x} | cells={len(self.archive)}")
@@ -879,9 +1014,11 @@ class GoExploreUIRunner:
             elif self.mode == "replay" and self.plan_ptr >= len(self.current_plan):
                 # Replay finished -> switch to explore
                 self.mode = "explore"
-                action_idx = self._sample_explore_action()
+                # 直後はポリシーで決定
+                action_idx = self.flow_policy.decide(self.last_flow_estimates or {})
             else:
-                action_idx = self._sample_explore_action()
+                # 光フローポリシーで探索
+                action_idx = self.flow_policy.decide(self.last_flow_estimates or {})
 
             # Step
             next_obs, reward, done, info = step_env(self.env, action_idx)
