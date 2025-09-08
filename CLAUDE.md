@@ -11,6 +11,7 @@ RandoMario is a Super Mario Bros. automation project built in Python that uses O
 ### Core Files
 - **Main Entry Point**: `main.py` - Contains the entire bandit learning application logic (~1000+ lines)
 - **Test Implementation**: `test.py` - Alternative Go-Explore style Mario agent with UI integration (~600+ lines)
+- **Optical Flow Implementation**: `optical_flow.py` - Go-Explore agent enhanced with real-time optical flow tracking and computer vision (~800+ lines)
 - **Progress Dashboard**: `progress_viewer.py` - GUI dashboard for monitoring stage completion status (~350+ lines)
 - The main codebase follows a monolithic structure with all functionality in single files
 
@@ -108,6 +109,30 @@ The system automatically selects the appropriate strategy based on the specified
 - Automatic pkl/ directory scanning with multi-action-set support
 - Background monitoring thread with graceful shutdown handling
 
+### Key Components in optical_flow.py:
+- **FlowBasedTracker**: Advanced computer vision system for real-time motion analysis
+- **Camera Motion Estimation**: Robust background flow analysis with HUD exclusion and EMA filtering
+- **Object Detection & Tracking**: Mario identification via residual flow analysis and connected components
+- **Motion Quantification**: Real-time velocity and acceleration calculation in both screen and world coordinates
+- **Visual Overlay System**: Real-time tracking visualization with bounding boxes and velocity vectors
+- **Archive Integration**: Full Go-Explore compatibility with optical flow-enhanced decision making
+
+**Optical Flow System Architecture:**
+- `FlowBasedTracker`: Core tracking class using OpenCV's Farneback optical flow algorithm
+- `_estimate_camera_flow()`: Median-based camera motion estimation with HUD masking
+- `_segment_moving_objects()`: Residual flow analysis for independent object motion detection
+- `_identify_mario()`: Mario-specific tracking with size/position heuristics and temporal consistency
+- `scale_bbox_to_screen()`: Coordinate transformation for visualization overlay
+- `_draw_optical_flow_overlay()`: Real-time visual feedback for tracked objects and motion vectors
+
+**Motion Analysis Features:**
+- **Background Subtraction**: Separates camera movement from object motion using residual flow
+- **Adaptive Thresholding**: Dynamic motion detection based on flow magnitude distribution
+- **Temporal Stability**: Exponential moving average filtering for smooth camera motion estimation
+- **Mario Detection**: Multi-frame tracking with sprite size heuristics and nearest-neighbor association
+- **Velocity Estimation**: Dual coordinate system (screen vs world) velocity calculation with acceleration derivatives
+- **Multi-object Tracking**: Detection and tracking of up to 8 secondary moving objects (enemies, power-ups, etc.)
+
 ## Development Commands
 
 ### Setup and Installation
@@ -134,6 +159,11 @@ uv run test.py --stage 1-1 --episodes 1000                            # Basic Go
 uv run test.py --stage 4-2 --actions complex --archive pkl/4-2.pkl    # Complex actions with custom archive
 uv run test.py --fps 120 --max-steps 8000                             # High FPS with extended episodes
 
+# Run the Optical Flow enhanced implementation
+uv run optical_flow.py --stage 1-1                                    # Basic optical flow tracking (saves to pkl/)
+uv run optical_flow.py --stage 4-4 --actions complex                  # Complex actions with computer vision
+uv run optical_flow.py --fps 120 --max-steps 8000                     # High FPS with extended motion analysis
+
 # Use original random behavior (disable all learning)
 uv run main.py --stage 1-1 --random                               # Pure random action selection
 
@@ -154,7 +184,7 @@ uv run main.py --help
 - `gym-super-mario-bros>=7.4.0`: Super Mario Bros. Gym environment
 - `pygame>=2.6.1`: Game display and UI rendering
 - `matplotlib>=3.7.5`: Currently unused but available for future data visualization
-- `opencv-python>=4.11.0.86`: Currently unused but available for future computer vision features
+- `opencv-python>=4.11.0.86`: Computer vision library used extensively in optical_flow.py for real-time motion analysis
 
 ### Python Version
 - Requires Python 3.8+
@@ -223,13 +253,19 @@ The application automatically downloads required assets (controller image) from 
 randomario/
 ├── fig/                    # Contains controller image assets
 │   └── famicon01_01.png   # Nintendo Famicom controller image (auto-downloaded)
+├── pkl/                   # Archive storage directory
+│   ├── go_explore_archive_*.pkl     # Go-Explore agent archives (from test.py)
+│   └── optical_flow_archive_*.pkl   # Optical flow enhanced archives (from optical_flow.py)
 ├── main.py                # Single main application file (~1100+ lines)
-├── pyproject.toml         # Project configuration and dependencies
-├── uv.lock               # Dependency lock file
-├── .gitignore            # Excludes auto-generated files
-├── bandit_*.json         # Learning statistics (auto-generated, gitignored)
-├── CLAUDE.md             # This development guide
-└── README.md             # Project documentation (Japanese)
+├── test.py               # Go-Explore implementation (~600+ lines)
+├── optical_flow.py       # Optical flow enhanced Go-Explore (~800+ lines)
+├── progress_viewer.py    # Progress monitoring GUI (~350+ lines)
+├── pyproject.toml        # Project configuration and dependencies
+├── uv.lock              # Dependency lock file
+├── .gitignore           # Excludes auto-generated files
+├── bandit_*.json        # Learning statistics (auto-generated, gitignored)
+├── CLAUDE.md            # This development guide
+└── README.md            # Project documentation (Japanese)
 ```
 
 **Generated Files:**
@@ -238,6 +274,11 @@ randomario/
   - `sequences`: Top-K successful action sequences with diversity scores
   - Automatically saved every 100 episodes and on exit
   - Stage-specific format (e.g., `bandit_1_1.json`, `bandit_7_4.json`)
+- `pkl/optical_flow_archive_{stage}_{actions}.pkl`: Optical flow enhanced archives containing:
+  - `archive`: Go-Explore cell archive with path sequences
+  - `best_overall_x`: Maximum X position reached
+  - `episodes_done`: Total episodes completed
+  - `first_clear_episode`: Episode number of first stage completion
 
 ## Development Notes
 
@@ -290,10 +331,19 @@ The project implements advanced learning capabilities:
 - **Adaptive Replay**: X-coordinate based early cutoff from successful sequences
 - **Stall Detection**: Automatic boost mode when progress stagnates
 - **Reward Learning**: Death penalties and progress rewards shape behavior
+- **Optical Flow Tracking**: Real-time computer vision for motion analysis and object tracking
+- **Go-Explore Integration**: Cell-based exploration with visual feedback enhancement
+
+**Computer Vision Capabilities:**
+- **Real-time Motion Analysis**: Farneback optical flow for camera and object motion estimation
+- **Background Subtraction**: Separates screen scrolling from object movement
+- **Multi-object Tracking**: Simultaneous tracking of Mario and up to 8 other moving objects
+- **Velocity Quantification**: Dual-coordinate velocity and acceleration calculations
+- **Visual Debugging**: Real-time overlay visualization for tracking validation
 
 **Future Enhancement Areas:**
 Based on dependencies, the project is designed to support:
-- Computer vision-based agents (opencv-python available)
+- Advanced computer vision algorithms (DIS/RAFT optical flow, feature-based tracking)
 - Data visualization and analysis (matplotlib available)  
 - More sophisticated reinforcement learning algorithms
 - LinUCB/Thompson sampling contextual bandits
