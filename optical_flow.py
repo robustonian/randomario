@@ -126,22 +126,22 @@ class FlowBasedTracker:
         # Other objects
         self.objects = []  # List of {bbox, v_screen, v_world}
         
-        # Flow parameters (enhanced for better moving object detection)
+        # Flow parameters (optimized for small slow objects like Goombas)
         self.flow_params = {
-            'pyr_scale': 0.5,
-            'levels': 4,           # Increased for better slow motion capture
-            'winsize': 21,         # Larger window for small/slow movements
-            'iterations': 5,       # More iterations for accuracy
-            'poly_n': 7,          # Higher polynomial degree
-            'poly_sigma': 1.5,    # Larger gaussian window
+            'pyr_scale': 0.6,      # Better for small motions (0.5→0.6)
+            'levels': 3,           # Reduced for small objects (4→3)
+            'winsize': 13,         # Smaller window for precise small motion (21→13)
+            'iterations': 7,       # More iterations for slow motion precision (5→7)
+            'poly_n': 5,          # Standard polynomial degree (7→5)
+            'poly_sigma': 1.1,    # Tighter gaussian for small features (1.5→1.1)
             'flags': cv2.OPTFLOW_FARNEBACK_GAUSSIAN
         }
         
-        # Motion detection thresholds (improved sensitivity)
+        # Motion detection thresholds (Goomba-optimized)
         self.motion_threshold_percentile = 85  # More sensitive to slow motion
         self.motion_threshold_multiplier = 0.7
-        self.min_component_area = 12           # Allow smaller objects
-        self.min_component_size = 3
+        self.min_component_area = 8            # Even smaller for Goombas (12→8)
+        self.min_component_size = 2            # Allow tiny objects (3→2)
         self.max_component_size = 80
         
         # Camera tracking with improved stability
@@ -199,10 +199,10 @@ class FlowBasedTracker:
         # Calculate magnitude of residual flow
         magnitude = np.linalg.norm(residual, axis=2)
         
-        # Use MAD (Median Absolute Deviation) for robust adaptive threshold
+        # Use MAD with Goomba-optimized threshold for small slow objects
         med = np.median(magnitude)
         mad = 1.4826 * np.median(np.abs(magnitude - med))  # Scale factor for normal distribution
-        threshold = max(0.4, med + 2.5 * mad)  # Lower minimum threshold, robust outlier detection
+        threshold = max(0.2, med + 1.8 * mad)  # Much lower threshold for tiny movements
         
         # Create binary mask for moving regions
         mask = (magnitude > threshold).astype(np.uint8) * 255
@@ -210,10 +210,11 @@ class FlowBasedTracker:
         # Exclude HUD area
         mask[:self.hud_height, :] = 0
         
-        # Morphological operations to clean up the mask (reduced opening for small objects)
-        kernel = np.ones((3, 3), np.uint8)
-        # Skip MORPH_OPEN to preserve small moving objects
-        mask = cv2.morphologyEx(mask, cv2.MORPH_DILATE, kernel, iterations=2)
+        # Morphological operations optimized for small objects like Goombas
+        kernel_small = np.ones((2, 2), np.uint8)  # Smaller kernel for tiny objects
+        # Very gentle processing to preserve Goomba-sized objects
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_small, iterations=1)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_DILATE, kernel_small, iterations=1)
         
         return mask, residual
     
@@ -458,21 +459,66 @@ class FlowBasedTracker:
         
         return result
 
+class FailureMemory:
+    """
+    失敗地点の学習システム。X座標をビン分割して死因別の対策を記録・活用。
+    """
+    def __init__(self, bin_size=50):
+        self.bin_size = bin_size
+        self.hazards = {}  # key: x_bin -> dict
+
+    def _key(self, x):
+        return int(x // self.bin_size)
+
+    def record(self, x_pos, cause, ctx=None):
+        """失敗を記録し、対策パラメータを更新"""
+        k = self._key(x_pos)
+        h = self.hazards.get(k, {
+            'type': cause,
+            'count': 0,
+            'min_hold': 8,        # 推奨ジャンプ保持の下限
+            'dx_trigger': 56,     # どの距離から事前作動するか（px相当）
+            'updated_at': time.time()
+        })
+        h['type'] = cause
+        h['count'] += 1
+        # 失敗が続くと保持時間を少しずつ増やす
+        if cause in ('FALL_GAP', 'ENEMY_COLLISION'):
+            h['min_hold'] = min(18, h.get('min_hold', 8) + 2)
+        elif cause == 'STUCK':
+            h['dx_trigger'] = max(30, h.get('dx_trigger', 56) - 10)  # より早めの対応
+        h['updated_at'] = time.time()
+        self.hazards[k] = h
+
+    def query_ahead(self, x_pos, lookahead_bins=3):
+        """現在位置から前方のビンをスキャンして最初のハザードを返す"""
+        k = self._key(x_pos)
+        for d in range(0, lookahead_bins + 1):
+            kk = k + d
+            if kk in self.hazards:
+                hx = kk * self.bin_size
+                return hx, self.hazards[kk]
+        return None, None
+
 class FlowHeuristicPolicy:
     """
     Optical Flowベースの簡易ヒューリスティック戦略。
     既定は右ダッシュ、障害物/減速/落下兆候でジャンプを開始し、保持時間を調整します。
     アクションセットに応じて可能な最良の組み合わせを選びます。
     """
-    def __init__(self, actions, action_indices, target_fps=60):
+    def __init__(self, actions, action_indices, target_fps=60, failure_memory=None):
         self.actions = actions
         self.a = action_indices
         self.dt = 1.0 / max(1, target_fps)
+        self.fm = failure_memory  # 失敗メモリ
         # 内部状態
         self.jump_hold = 0
         self.ground_frames = 0
         self.last_bottom_y = None
         self.stuck_frames = 0
+        # Aボタンのリリース制御と接地エッジ検出用
+        self.release_a_frames = 0
+        self.prev_on_ground = False
 
         # 閾値
         self.vx_slow = 0.5       # v_world_x がこの値未満だと減速/詰まり傾向
@@ -488,6 +534,8 @@ class FlowHeuristicPolicy:
         self.ground_frames = 0
         self.last_bottom_y = None
         self.stuck_frames = 0
+        self.release_a_frames = 0
+        self.prev_on_ground = False
 
     def _best(self, labels):
         # 与えた候補ラベル列から、利用可能な最初のものを返す
@@ -554,47 +602,79 @@ class FlowHeuristicPolicy:
         
         return moving_obstacle or static_wall or gap
 
-    def decide(self, flow_estimates):
-        # Marioが見つからない場合は、右ダッシュ前進
+    def decide(self, flow_estimates, info=None):
         mario = flow_estimates.get('mario')
         objects = flow_estimates.get('objects', [])
+
+        # on_ground を先に更新（エッジ検出のため）
+        on_ground = self._on_ground_update(mario)
+
+        # 空中→接地の立ち上がりで A を1フレーム離す
+        if on_ground and not self.prev_on_ground:
+            self.release_a_frames = max(self.release_a_frames, 1)
+            self.jump_hold = 0  # 押しっぱなし残留をクリア
+
+        # Aリリース優先（このフレームはAなしの右行動）
+        if self.release_a_frames > 0:
+            self.release_a_frames -= 1
+            self.prev_on_ground = on_ground
+            return self._right()
+
         # 既にジャンプ保持中なら継続
         if self.jump_hold > 0:
             self.jump_hold -= 1
+            self.prev_on_ground = on_ground
             return self._right_jump()
 
+        # マリオ未検出時は右ダッシュ
         if not mario:
+            self.prev_on_ground = on_ground
             return self._right()
 
         vx, vy = mario['v_world']
-        on_ground = self._on_ground_update(mario)
 
-        # 詰まり検出（ほぼ前進していない）
+        # 失敗メモリから前方ハザードを照会
+        if self.fm is not None and info is not None:
+            x_pos = float(info.get('x_pos', 0.0))
+            hx, hazard = self.fm.query_ahead(x_pos, lookahead_bins=3)
+            if hx is not None and on_ground:
+                dx_world = hx - x_pos
+                # 前方一定距離以内なら事前ジャンプ
+                if 0 <= dx_world <= float(hazard.get('dx_trigger', 56)):
+                    base_hold = max(self.min_jump_hold, hazard.get('min_hold', self.min_jump_hold))
+                    # 速度が高ければ少し増やす
+                    hold = int(base_hold + min(4, max(0.0, vx) * 2))
+                    self.jump_hold = max(self.jump_hold, min(self.max_jump_hold, hold))
+                    self.prev_on_ground = on_ground
+                    return self._right_jump()
+
+        # 詰まり検出
         if abs(vx) < 0.2 and on_ground:
             self.stuck_frames += 1
         else:
             self.stuck_frames = 0
 
-        # 落下中ならジャンプボタンを追加保持（滞空延長）
+        # 落下中なら滞空延長
         if not on_ground and vy > self.fall_vy:
             self.jump_hold = max(self.jump_hold, 4)
+            self.prev_on_ground = on_ground
             return self._right_jump()
 
         # 障害物や減速兆候でジャンプ開始
         obstacle = self._obstacle_ahead(mario, objects, flow_estimates)
         if on_ground and (obstacle or vx < self.vx_slow or self.stuck_frames > self.stuck_limit):
-            # 速度に応じて保持時間を調整（速いほど長めに）
             hold = int(self.min_jump_hold + (self.max_jump_hold - self.min_jump_hold) * max(0.0, min(1.0, vx / 2.5)))
             self.jump_hold = max(self.jump_hold, hold)
             self.stuck_frames = 0
+            self.prev_on_ground = on_ground
             return self._right_jump()
 
-        # たまに段差で引っかかる場合の微調整（空中で右ジャンプ継続、接地で稀に左微調整）
+        # 微調整
         if on_ground and vx < 0.25 and not obstacle:
-            # ほんの少し左に戻って体勢立て直し（アクションが無い場合は単に右）
+            self.prev_on_ground = on_ground
             return self._left() if 'LEFT' in self.a else self._right()
 
-        # 既定は右ダッシュで前進
+        self.prev_on_ground = on_ground
         return self._right()
 
 # UI constants
@@ -813,8 +893,13 @@ class GoExploreUIRunner:
         # Optical flow tracker
         self.flow_tracker = FlowBasedTracker(fps=target_fps, hud_height=40)
         self.last_flow_estimates = {}
+        
+        # Failure memory and flow history for learning
+        self.failure_memory = FailureMemory(bin_size=self.cell_size_x)
+        self.flow_history = deque(maxlen=20)
+        
         # Flow-based policy
-        self.flow_policy = FlowHeuristicPolicy(self.actions, self.action_indices, target_fps)
+        self.flow_policy = FlowHeuristicPolicy(self.actions, self.action_indices, target_fps, failure_memory=self.failure_memory)
 
         # UI
         self._init_pygame()
@@ -941,8 +1026,14 @@ class GoExploreUIRunner:
                 self.episodes_done = data.get("episodes_done", 0)
                 self.first_clear_episode = data.get("first_clear_episode", None)
                 
+                # 失敗メモリの読み込み
+                fm = data.get("failure_memory", None)
+                if isinstance(fm, dict):
+                    self.failure_memory.hazards = fm
+                
                 clear_info = f", first_clear_ep={self.first_clear_episode}" if self.first_clear_episode else ", not_cleared_yet"
-                print(f"[INFO] Loaded archive: {len(self.archive)} cells, best_x={self.best_overall_x}, episodes_done={self.episodes_done}{clear_info} from {self.archive_path}")
+                hazard_info = f", hazards={len(self.failure_memory.hazards)}"
+                print(f"[INFO] Loaded archive: {len(self.archive)} cells, best_x={self.best_overall_x}, episodes_done={self.episodes_done}{clear_info}{hazard_info} from {self.archive_path}")
             except Exception as e:
                 print(f"[WARN] Failed to load archive from {self.archive_path}: {e}")
 
@@ -957,6 +1048,7 @@ class GoExploreUIRunner:
             "first_clear_episode": self.first_clear_episode,
             "stage": self.stage,
             "updated_at": time.time(),
+            "failure_memory": self.failure_memory.hazards,  # 追加
         }
         tmp_path = self.archive_path + ".tmp"
         try:
@@ -1059,6 +1151,51 @@ class GoExploreUIRunner:
         # Reset policy state
         self.flow_policy.reset()
 
+    def _push_flow_history(self, estimates, info):
+        """フロー推定結果とゲーム情報を履歴に追加"""
+        self.flow_history.append({
+            "info": dict(info),
+            "mario": estimates.get("mario"),
+            "objects": estimates.get("objects", []),
+            "gap_ahead": bool(estimates.get("gap_ahead", False)),
+            "static_wall_ahead": bool(estimates.get("static_wall_ahead", False))
+        })
+
+    def _infer_death_cause(self):
+        """直近のフローヒストリから死因を推定"""
+        hist = list(self.flow_history)
+        if not hist:
+            return "UNKNOWN", {}
+            
+        # 直近フレームの分析
+        recent = hist[-8:]
+        
+        # ギャップ落下: 直前にgap_aheadがあり、マリオvyが下向きで加速していた
+        gap_seen = any(h.get("gap_ahead", False) for h in recent[:-1])
+        m_list = [h["mario"] for h in recent if h.get("mario")]
+        if gap_seen and len(m_list) >= 2:
+            vy_last = m_list[-1]["v_world"][1]
+            vy_prev = m_list[-2]["v_world"][1] if len(m_list) > 1 else 0
+            if vy_last > 0.8 and vy_last >= vy_prev:  # 下向き加速気味
+                return "FALL_GAP", {}
+
+        # 敵接触: 直近フレームでマリオbboxと他オブジェクトbboxが重なった
+        for h in reversed(recent):
+            m = h.get("mario")
+            if not m:
+                continue
+            mx, my, mw, mh = m["bbox"]
+            for obj in h.get("objects", []):
+                x, y, w, hh = obj["bbox"]
+                if x < mx + mw and x + w > mx and y < my + mh and y + hh > my:
+                    return "ENEMY_COLLISION", {}
+
+        # 静的障害物由来（推定）
+        if any(h.get("static_wall_ahead", False) for h in recent):
+            return "WALL_OR_OTHER", {}
+            
+        return "UNKNOWN", {}
+
     def _end_episode(self, reason: str):
         print(f"[EP] End: {reason} | ep={self.episodes_done} | ep_max_x={self.ep_max_x} | best_x={self.best_overall_x} | cells={len(self.archive)}")
         if (self.episodes_done % self.save_every_episodes) == 0:
@@ -1101,10 +1238,10 @@ class GoExploreUIRunner:
                 # Replay finished -> switch to explore
                 self.mode = "explore"
                 # 直後はポリシーで決定
-                action_idx = self.flow_policy.decide(self.last_flow_estimates or {})
+                action_idx = self.flow_policy.decide(self.last_flow_estimates or {}, info)
             else:
                 # 光フローポリシーで探索
-                action_idx = self.flow_policy.decide(self.last_flow_estimates or {})
+                action_idx = self.flow_policy.decide(self.last_flow_estimates or {}, info)
 
             # Step
             next_obs, reward, done, info = step_env(self.env, action_idx)
@@ -1113,6 +1250,8 @@ class GoExploreUIRunner:
             
             # Update optical flow tracking
             self.last_flow_estimates = self.flow_tracker.update(next_obs)
+            # ヒストリにプッシュ
+            self._push_flow_history(self.last_flow_estimates, info)
 
             # Bookkeeping
             self.current_path.append(action_idx)
@@ -1171,6 +1310,22 @@ class GoExploreUIRunner:
 
             # End episode if reason decided
             if reason is not None:
+                # 死亡原因の記録（クリア/タイムアップ以外）
+                if reason in ("DEAD", "STUCK"):
+                    cause, ctx = self._infer_death_cause()
+                    if reason == "STUCK":
+                        cause = "STUCK"
+                    elif int(info.get('time', 400)) <= 1:
+                        cause = "TIMEUP"
+                    
+                    # 記録位置は直前の安全フレームを使う
+                    x_for_record = info.get('x_pos', 0)
+                    if len(self.flow_history) >= 2:
+                        x_for_record = self.flow_history[-2]["info"].get('x_pos', x_for_record)
+                    
+                    self.failure_memory.record(float(x_for_record), cause, ctx)
+                    print(f"[LEARN] Failure recorded at x≈{int(x_for_record)} cause={cause}")
+                
                 self._end_episode(reason)
 
             self.clock.tick(self.target_fps)
