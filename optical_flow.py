@@ -1238,10 +1238,10 @@ class GoExploreUIRunner:
                 # Replay finished -> switch to explore
                 self.mode = "explore"
                 # 直後はポリシーで決定
-                action_idx = self.flow_policy.decide(self.last_flow_estimates or {}, info)
+                action_idx = self.flow_policy.decide(self.last_flow_estimates or {}, self.last_info)
             else:
                 # 光フローポリシーで探索
-                action_idx = self.flow_policy.decide(self.last_flow_estimates or {}, info)
+                action_idx = self.flow_policy.decide(self.last_flow_estimates or {}, self.last_info)
 
             # Step
             next_obs, reward, done, info = step_env(self.env, action_idx)
