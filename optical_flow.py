@@ -85,9 +85,7 @@ def step_env(env, action_idx: int):
 @dataclass
 class Cell:
     cell_id: Tuple[int, int, str]  # (x_bin, y_bin, status)
-    path: List[int] = field(default_factory=list)  # Action sequence from start to reach this cell
     max_x: int = 0  # Maximum x reached when reaching this cell
-    visits: int = 0  # Number of times used as starting cell
     created_at: float = field(default_factory=time.time)
 
 # Optical Flow Tracker Class
@@ -129,7 +127,7 @@ class FlowBasedTracker:
         # Flow parameters (optimized for small slow objects like Goombas)
         self.flow_params = {
             'pyr_scale': 0.6,      # Better for small motions (0.5→0.6)
-            'levels': 3,           # Reduced for small objects (4→3)
+            'levels': 2,           # Reduced for small objects (4→3)
             'winsize': 13,         # Smaller window for precise small motion (21→13)
             'iterations': 7,       # More iterations for slow motion precision (5→7)
             'poly_n': 5,          # Standard polynomial degree (7→5)
@@ -500,17 +498,55 @@ class FailureMemory:
                 return hx, self.hazards[kk]
         return None, None
 
+class StaticMapMemory:
+    """
+    静的地形構造の学習システム。ギャップ・壁・障害物の位置を記録。
+    """
+    def __init__(self, bin_size=32):
+        self.bin_size = bin_size
+        self.gaps = set()   # x_bin集合
+        self.walls = set()  # x_bin集合
+
+    def _key(self, x):
+        return int(x // self.bin_size)
+
+    def observe(self, x_pos, flow_estimates):
+        """現在位置での静的ハザードを観測・記録"""
+        k = self._key(x_pos)
+        if flow_estimates.get("gap_ahead"):
+            # 先を見越してマーキング（40px先）
+            gap_k = self._key(x_pos + 40)
+            self.gaps.add(gap_k)
+        if flow_estimates.get("static_wall_ahead"):
+            # 壁も先読み記録（32px先）
+            wall_k = self._key(x_pos + 32)
+            self.walls.add(wall_k)
+
+    def query_ahead(self, x_pos, lookahead_bins=3):
+        """前方に静的ハザードがあるかチェック"""
+        k = self._key(x_pos)
+        for d in range(1, lookahead_bins + 1):
+            check_k = k + d
+            if check_k in self.gaps or check_k in self.walls:
+                return True
+        return False
+
+    def get_stats(self):
+        """統計情報を返す"""
+        return {"gaps": len(self.gaps), "walls": len(self.walls)}
+
 class FlowHeuristicPolicy:
     """
     Optical Flowベースの簡易ヒューリスティック戦略。
     既定は右ダッシュ、障害物/減速/落下兆候でジャンプを開始し、保持時間を調整します。
     アクションセットに応じて可能な最良の組み合わせを選びます。
     """
-    def __init__(self, actions, action_indices, target_fps=60, failure_memory=None):
+    def __init__(self, actions, action_indices, target_fps=60, failure_memory=None, static_map=None):
         self.actions = actions
         self.a = action_indices
         self.dt = 1.0 / max(1, target_fps)
         self.fm = failure_memory  # 失敗メモリ
+        self.sm = static_map     # 静的マップメモリ
         # 内部状態
         self.jump_hold = 0
         self.ground_frames = 0
@@ -633,18 +669,30 @@ class FlowHeuristicPolicy:
 
         vx, vy = mario['v_world']
 
-        # 失敗メモリから前方ハザードを照会
-        if self.fm is not None and info is not None:
+        # 学習メモリから前方ハザードを照会
+        if info is not None:
             x_pos = float(info.get('x_pos', 0.0))
-            hx, hazard = self.fm.query_ahead(x_pos, lookahead_bins=3)
-            if hx is not None and on_ground:
-                dx_world = hx - x_pos
-                # 前方一定距離以内なら事前ジャンプ
-                if 0 <= dx_world <= float(hazard.get('dx_trigger', 56)):
-                    base_hold = max(self.min_jump_hold, hazard.get('min_hold', self.min_jump_hold))
-                    # 速度が高ければ少し増やす
-                    hold = int(base_hold + min(4, max(0.0, vx) * 2))
-                    self.jump_hold = max(self.jump_hold, min(self.max_jump_hold, hold))
+            
+            # 失敗メモリからの回避行動
+            if self.fm is not None:
+                hx, hazard = self.fm.query_ahead(x_pos, lookahead_bins=3)
+                if hx is not None and on_ground:
+                    dx_world = hx - x_pos
+                    # 前方一定距離以内なら事前ジャンプ
+                    if 0 <= dx_world <= float(hazard.get('dx_trigger', 56)):
+                        base_hold = max(self.min_jump_hold, hazard.get('min_hold', self.min_jump_hold))
+                        # 速度が高ければ少し増やす
+                        hold = int(base_hold + min(4, max(0.0, vx) * 2))
+                        self.jump_hold = max(self.jump_hold, min(self.max_jump_hold, hold))
+                        self.prev_on_ground = on_ground
+                        return self._right_jump()
+            
+            # 静的マップからの予防ジャンプ
+            if self.sm is not None and on_ground:
+                if self.sm.query_ahead(x_pos, lookahead_bins=2):
+                    # 静的障害物用の標準ジャンプ
+                    hold = int(self.min_jump_hold + 4)  # 少し長めに
+                    self.jump_hold = max(self.jump_hold, hold)
                     self.prev_on_ground = on_ground
                     return self._right_jump()
 
@@ -829,14 +877,8 @@ class GoExploreUIRunner:
         cell_size_x: int = 50,
         cell_size_y: int = 40,
         max_steps_per_episode: int = 6000,
-        explore_steps_after_return: int = 1200,
         stuck_frame_window: int = 60,
         save_every_episodes: int = 10,
-        down_press_prob: float = 0.02,
-        left_adjust_prob: float = 0.05,
-        jump_start_prob: float = 0.12,
-        jump_min_hold: int = 6,
-        jump_max_hold: int = 14,
         target_fps: int = 60,
     ):
         self.stage = stage
@@ -846,15 +888,9 @@ class GoExploreUIRunner:
         self.cell_size_x = cell_size_x
         self.cell_size_y = cell_size_y
         self.max_steps_per_episode = max_steps_per_episode
-        self.explore_steps_after_return = explore_steps_after_return
         self.stuck_frame_window = stuck_frame_window
         self.save_every_episodes = save_every_episodes
 
-        self.down_press_prob = down_press_prob
-        self.left_adjust_prob = left_adjust_prob
-        self.jump_start_prob = jump_start_prob
-        self.jump_min_hold = jump_min_hold
-        self.jump_max_hold = jump_max_hold
 
         self.target_fps = target_fps
 
@@ -875,31 +911,27 @@ class GoExploreUIRunner:
         self.episodes_done: int = 0
         self.first_clear_episode: Optional[int] = None  # Episode number of first stage clear
 
-        # Replay/Explore control
-        self.current_plan: List[int] = []  # Current replay plan (return to cell)
-        self.plan_ptr: int = 0
-        self.mode: str = "replay"  # "replay" or "explore"
-        self.explore_steps_left: int = self.explore_steps_after_return
+        # Episode tracking (pure policy-based)
         self.current_path: List[int] = []  # Action sequence executed in current episode
         self.ep_max_x: int = 0
         self.last_info: dict = {}
         self.prev_x_deque = deque(maxlen=self.stuck_frame_window)
 
-        # Heuristic holds
-        self.jump_hold_frames_remaining = 0
-        self.left_hold_frames_remaining = 0
-        self.down_hold_frames_remaining = 0
 
         # Optical flow tracker
         self.flow_tracker = FlowBasedTracker(fps=target_fps, hud_height=40)
         self.last_flow_estimates = {}
         
-        # Failure memory and flow history for learning
+        # Learning systems
         self.failure_memory = FailureMemory(bin_size=self.cell_size_x)
+        self.static_map = StaticMapMemory(bin_size=32)
         self.flow_history = deque(maxlen=20)
         
-        # Flow-based policy
-        self.flow_policy = FlowHeuristicPolicy(self.actions, self.action_indices, target_fps, failure_memory=self.failure_memory)
+        # Flow-based policy with learning integration
+        self.flow_policy = FlowHeuristicPolicy(
+            self.actions, self.action_indices, target_fps, 
+            failure_memory=self.failure_memory, static_map=self.static_map
+        )
 
         # UI
         self._init_pygame()
@@ -968,7 +1000,7 @@ class GoExploreUIRunner:
         x = int(self.last_info.get('x_pos', 0))
         time_left = int(self.last_info.get('time', 0))
         flag = bool(self.last_info.get('flag_get', False))
-        mode_str = "REPLAY" if self.mode == "replay" else "EXPLORE"
+        mode_str = "POLICY"
 
         clear_status = f"FirstClear: {self.first_clear_episode}" if self.first_clear_episode else "FirstClear: None"
         
@@ -977,7 +1009,7 @@ class GoExploreUIRunner:
             f"Stage: {self.stage} | Mode: {mode_str} | {clear_status}",
             f"Ep: {self.episodes_done} | BestX: {self.best_overall_x} | Cells: {len(self.archive)}",
             f"EpMaxX: {self.ep_max_x} | CurrX: {x} | Time: {time_left} | Flag: {flag}",
-            f"PlanLen: {len(self.current_plan)} | PlanPtr: {self.plan_ptr} | ExploreLeft: {self.explore_steps_left}",
+            f"PathLen: {len(self.current_path)} | FailureMem: {len(self.failure_memory.hazards)} | StaticMap: G{len(self.static_map.gaps)}W{len(self.static_map.walls)}",
             f"Action: {'+'.join(self.actions[action_idx])}",
         ]
         
@@ -1030,6 +1062,12 @@ class GoExploreUIRunner:
                 fm = data.get("failure_memory", None)
                 if isinstance(fm, dict):
                     self.failure_memory.hazards = fm
+                    
+                # 静的マップの読み込み
+                sm = data.get("static_map", None)
+                if isinstance(sm, dict):
+                    self.static_map.gaps = set(sm.get("gaps", []))
+                    self.static_map.walls = set(sm.get("walls", []))
                 
                 clear_info = f", first_clear_ep={self.first_clear_episode}" if self.first_clear_episode else ", not_cleared_yet"
                 hazard_info = f", hazards={len(self.failure_memory.hazards)}"
@@ -1048,7 +1086,11 @@ class GoExploreUIRunner:
             "first_clear_episode": self.first_clear_episode,
             "stage": self.stage,
             "updated_at": time.time(),
-            "failure_memory": self.failure_memory.hazards,  # 追加
+            "failure_memory": self.failure_memory.hazards,
+            "static_map": {
+                "gaps": list(self.static_map.gaps),
+                "walls": list(self.static_map.walls)
+            },
         }
         tmp_path = self.archive_path + ".tmp"
         try:
@@ -1068,67 +1110,15 @@ class GoExploreUIRunner:
         y_bin = max(0, y // self.cell_size_y)
         return (int(x_bin), int(y_bin), status)
 
-    def _maybe_add_or_update_cell(self, cell_id: Tuple[int, int, str], path: List[int], current_x: int):
+    def _maybe_add_or_update_cell(self, cell_id: Tuple[int, int, str], current_x: int):
         cell = self.archive.get(cell_id)
         if cell is None:
-            self.archive[cell_id] = Cell(cell_id=cell_id, path=list(path), max_x=current_x)
+            self.archive[cell_id] = Cell(cell_id=cell_id, max_x=current_x)
         else:
-            updated = False
             if current_x > cell.max_x:
                 cell.max_x = current_x
-                updated = True
-            if len(path) < len(cell.path):
-                cell.path = list(path)
-                updated = True
 
-    def _select_start_cell_path(self) -> List[int]:
-        if not self.archive:
-            return []
-        cells = list(self.archive.values())
-        cells.sort(key=lambda c: c.max_x, reverse=True)
-        top_k = cells[: min(60, len(cells))]
-        best_x = max(1, self.best_overall_x)
-        weights = []
-        for c in top_k:
-            w = (1.0 / (c.visits + 1.0)) * (0.5 + 0.5 * (c.max_x / best_x))
-            weights.append(max(1e-8, w))
-        choice = random.choices(top_k, weights=weights, k=1)[0]
-        choice.visits += 1
-        return list(choice.path)
 
-    def _sample_explore_action(self) -> int:
-        # Get action indices, using fallback values if actions don't exist
-        idx_down = self.action_indices.get('DOWN', self.action_indices.get('NOOP', 0))
-        idx_down_jump = self.action_indices.get('DOWN_JUMP', idx_down)
-        idx_left = self.action_indices.get('LEFT', self.action_indices.get('NOOP', 0))
-        idx_left_jump = self.action_indices.get('LEFT_JUMP', idx_left)
-        idx_right_dash_jump = self.action_indices.get('RIGHT_DASH_JUMP', self.action_indices.get('RIGHT_JUMP', self.action_indices.get('RIGHT', 1)))
-        idx_right_dash = self.action_indices.get('RIGHT_DASH', self.action_indices.get('RIGHT', 1))
-
-        if self.down_hold_frames_remaining > 0:
-            self.down_hold_frames_remaining -= 1
-            return idx_down if random.random() < 0.6 else idx_down_jump
-
-        if self.left_hold_frames_remaining > 0:
-            self.left_hold_frames_remaining -= 1
-            return idx_left if random.random() < 0.6 else idx_left_jump
-
-        if self.jump_hold_frames_remaining > 0:
-            self.jump_hold_frames_remaining -= 1
-            return idx_right_dash_jump
-
-        r = random.random()
-        if r < self.down_press_prob:
-            self.down_hold_frames_remaining = random.randint(10, 30)
-            return idx_down
-        elif r < self.down_press_prob + self.left_adjust_prob:
-            self.left_hold_frames_remaining = random.randint(5, 20)
-            return idx_left
-        elif r < self.down_press_prob + self.left_adjust_prob + self.jump_start_prob:
-            self.jump_hold_frames_remaining = random.randint(self.jump_min_hold, self.jump_max_hold)
-            return idx_right_dash_jump
-
-        return idx_right_dash
 
     def _start_new_episode(self):
         self.episodes_done += 1
@@ -1136,11 +1126,8 @@ class GoExploreUIRunner:
         self.ep_max_x = 0
         self.prev_x_deque.clear()
 
-        # Plan (return to cell)
-        self.current_plan = self._select_start_cell_path()
-        self.plan_ptr = 0
-        self.mode = "replay"
-        self.explore_steps_left = self.explore_steps_after_return
+        # Pure policy-based action selection (no replay)
+        self.mode = "policy"  # Single mode: always policy-based
 
         # Reset env
         obs, info = reset_env(self.env)
@@ -1231,17 +1218,8 @@ class GoExploreUIRunner:
                 self.clock.tick(self.target_fps)
                 continue
 
-            # Decide action
-            if self.mode == "replay" and self.plan_ptr < len(self.current_plan):
-                action_idx = self.current_plan[self.plan_ptr]
-            elif self.mode == "replay" and self.plan_ptr >= len(self.current_plan):
-                # Replay finished -> switch to explore
-                self.mode = "explore"
-                # 直後はポリシーで決定
-                action_idx = self.flow_policy.decide(self.last_flow_estimates or {}, self.last_info)
-            else:
-                # 光フローポリシーで探索
-                action_idx = self.flow_policy.decide(self.last_flow_estimates or {}, self.last_info)
+            # Pure policy-based action decision (no more replay)
+            action_idx = self.flow_policy.decide(self.last_flow_estimates or {}, self.last_info)
 
             # Step
             next_obs, reward, done, info = step_env(self.env, action_idx)
@@ -1252,13 +1230,11 @@ class GoExploreUIRunner:
             self.last_flow_estimates = self.flow_tracker.update(next_obs)
             # ヒストリにプッシュ
             self._push_flow_history(self.last_flow_estimates, info)
+            # 静的マップ観測
+            self.static_map.observe(info.get('x_pos', 0), self.last_flow_estimates)
 
             # Bookkeeping
             self.current_path.append(action_idx)
-            if self.mode == "replay":
-                self.plan_ptr += 1
-            else:
-                self.explore_steps_left = max(0, self.explore_steps_left - 1)
 
             x = int(info.get('x_pos', 0))
             self.ep_max_x = max(self.ep_max_x, x)
@@ -1266,7 +1242,7 @@ class GoExploreUIRunner:
 
             # Cell update
             cell_id = self._info_to_cell_id(info)
-            self._maybe_add_or_update_cell(cell_id, self.current_path, x)
+            self._maybe_add_or_update_cell(cell_id, x)
 
             # Best update
             if self.ep_max_x > self.best_overall_x:
@@ -1293,13 +1269,6 @@ class GoExploreUIRunner:
                 if len(self.prev_x_deque) == self.prev_x_deque.maxlen:
                     if max(self.prev_x_deque) - min(self.prev_x_deque) < 2:
                         reason = "STUCK"
-                # Finished exploring
-                if reason is None and self.mode == "explore" and self.explore_steps_left <= 0:
-                    reason = "EXPLORE_DONE"
-
-            # Replay too long (safety)
-            if reason is None and self.mode == "replay" and self.plan_ptr > self.max_steps_per_episode:
-                reason = "REPLAY_TOO_LONG"
 
             # Total steps exceeded limit (safety)
             if reason is None and len(self.current_path) >= self.max_steps_per_episode:
@@ -1346,7 +1315,6 @@ def main():
     parser.add_argument("--seed", type=int, default=None, help="Random seed")
     parser.add_argument("--fps", type=int, default=60, help="Target FPS for UI")
     parser.add_argument("--max-steps", type=int, default=6000, help="Max steps per episode")
-    parser.add_argument("--explore-steps", type=int, default=1200, help="Explore steps after replay")
     args = parser.parse_args()
 
     # Create pkl directory if it doesn't exist
@@ -1372,7 +1340,6 @@ def main():
         actions=actions,
         seed=args.seed,
         max_steps_per_episode=args.max_steps,
-        explore_steps_after_return=args.explore_steps,
         target_fps=args.fps,
     )
     runner.run(max_episodes=args.episodes)
