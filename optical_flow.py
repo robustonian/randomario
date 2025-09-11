@@ -10,6 +10,7 @@ from typing import Dict, List, Tuple, Optional
 import numpy as np
 import pygame
 import cv2  # Added for optical flow
+import os  # Added for CPU count
 import gym_super_mario_bros
 from nes_py.wrappers import JoypadSpace
 from gym_super_mario_bros.actions import COMPLEX_MOVEMENT, SIMPLE_MOVEMENT, RIGHT_ONLY
@@ -100,16 +101,49 @@ class FlowBasedTracker:
     - Velocity and acceleration estimation
     """
     
-    def __init__(self, fps=60, hud_height=40):
+    def __init__(self, fps=60, hud_height=40, use_gpu=True, num_threads=None):
         self.prev_gray = None
         self.fps = fps
         self.dt = 1.0 / max(1, fps)
         self.hud_height = hud_height
         
-        # Camera tracking
-        self.cam_vx_ema = 0.0
-        self.cam_vy_ema = 0.0
+        # Performance optimization settings
+        self.use_gpu = use_gpu
+        self.num_threads = num_threads or min(4, os.cpu_count())
+        self.gpu_available = False
+        self.gpu_flow = None
+        
+        # Initialize GPU if available
+        if use_gpu:
+            try:
+                # Check if GPU is available
+                if cv2.cuda.getCudaEnabledDeviceCount() > 0:
+                    self.gpu_available = True
+                    self.gpu_flow = cv2.cuda_FarnebackOpticalFlow.create(
+                        numLevels=10,
+                        pyrScale=0.0,  # Updated parameter
+                        fastPyramids=False,
+                        winSize=10,
+                        numIters=10,
+                        polyN=10,
+                        polySigma=1.0,
+                        flags=cv2.OPTFLOW_FARNEBACK_GAUSSIAN
+                    )
+                    print("[INFO] GPU acceleration enabled for optical flow")
+                else:
+                    print("[WARN] GPU requested but not available, using CPU")
+            except Exception as e:
+                print(f"[WARN] GPU initialization failed: {e}, using CPU")
+        
+        # Set CPU threading
+        cv2.setNumThreads(self.num_threads)
+        print(f"[INFO] Using {self.num_threads} CPU threads for OpenCV")
+        
+        # Background flow tracking (screen coordinates)
+        self.bg_vx_ema = 0.0  # Background flow x (left negative for right scroll)
+        self.bg_vy_ema = 0.0  # Background flow y (always 0 for horizontal scrollers)
         self.ema_alpha = 0.3  # Exponential moving average for stability
+        # Camera position (world coordinates)
         self.cam_x = 0.0
         self.cam_y = 0.0
         
@@ -126,12 +160,12 @@ class FlowBasedTracker:
         
         # Flow parameters (optimized for small slow objects like Goombas)
         self.flow_params = {
-            'pyr_scale': 0.6,      # Better for small motions (0.5→0.6)
-            'levels': 2,           # Reduced for small objects (4→3)
-            'winsize': 13,         # Smaller window for precise small motion (21→13)
-            'iterations': 7,       # More iterations for slow motion precision (5→7)
-            'poly_n': 5,          # Standard polynomial degree (7→5)
-            'poly_sigma': 1.1,    # Tighter gaussian for small features (1.5→1.1)
+            'pyr_scale': 0.,      # Better for small motions (0.5→0.6)
+            'levels': 10,           # Reduced for small objects (4→3)
+            'winsize': 10,         # Smaller window for precise small motion (21→13)
+            'iterations': 10,       # More iterations for slow motion precision (5→7)
+            'poly_n': 10,          # Standard polynomial degree (7→5)
+            'poly_sigma': 1,    # Tighter gaussian for small features (1.5→1.1)
             'flags': cv2.OPTFLOW_FARNEBACK_GAUSSIAN
         }
         
@@ -148,6 +182,53 @@ class FlowBasedTracker:
         # Mario detection parameters
         self.mario_sprite_size = (18, 28)  # Approximate Mario sprite size
         self.mario_initial_x_bias = 100  # Prefer left side of screen initially
+    
+    def _calculate_optical_flow_optimized(self, prev_gray, curr_gray):
+        """Calculate optical flow using GPU acceleration if available, otherwise CPU optimized."""
+        if self.gpu_available and self.gpu_flow is not None:
+            return self._calculate_flow_gpu(prev_gray, curr_gray)
+        else:
+            return self._calculate_flow_cpu_optimized(prev_gray, curr_gray)
+    
+    def _calculate_flow_gpu(self, prev_gray, curr_gray):
+        """GPU-accelerated optical flow calculation."""
+        try:
+            # Upload frames to GPU memory
+            gpu_prev = cv2.cuda_GpuMat()
+            gpu_curr = cv2.cuda_GpuMat()
+            gpu_flow = cv2.cuda_GpuMat()
+            
+            gpu_prev.upload(prev_gray)
+            gpu_curr.upload(curr_gray)
+            
+            # Compute flow on GPU
+            self.gpu_flow.calc(gpu_prev, gpu_curr, gpu_flow)
+            
+            # Download result back to CPU
+            flow = gpu_flow.download()
+            return flow
+            
+        except Exception as e:
+            print(f"[WARN] GPU flow calculation failed: {e}, falling back to CPU")
+            self.gpu_available = False
+            return self._calculate_flow_cpu_optimized(prev_gray, curr_gray)
+    
+    def _calculate_flow_cpu_optimized(self, prev_gray, curr_gray):
+        """CPU-optimized optical flow calculation with performance tuning."""
+        # Use optimized parameters for speed vs accuracy trade-off
+        flow_params_optimized = {
+            'pyr_scale': 0.5,      # Increased for speed (0.0 is slow)
+            'levels': 3,           # Reduced levels for speed (10→3)
+            'winsize': 15,         # Moderate window size (10→15)
+            'iterations': 3,       # Reduced iterations for speed (10→3)
+            'poly_n': 5,          # Reduced polynomial degree (10→5)
+            'poly_sigma': 1.2,    # Standard sigma
+            'flags': cv2.OPTFLOW_FARNEBACK_GAUSSIAN
+        }
+        
+        return cv2.calcOpticalFlowFarneback(
+            prev_gray, curr_gray, None, **flow_params_optimized
+        )
         
     def _estimate_camera_flow(self, flow, mario_bbox=None):
         """Estimate camera movement from background flow, excluding HUD area and Mario vicinity."""
@@ -175,24 +256,21 @@ class FlowBasedTracker:
             return 0.0, 0.0
             
         # Use median for robust estimation (resistant to outliers)
-        vx = np.median(fx)
-        vy = np.median(fy)
-        
-        # Clamp vertical velocity for horizontal scrolling games
-        vy = np.clip(vy, -0.2, 0.2)
+        bg_vx = np.median(fx)  # Background flow (left is negative for right scroll)
+        bg_vy = 0.0  # Fixed to zero for horizontal scrollers
         
         # Apply exponential moving average for temporal stability
-        self.cam_vx_ema = (1 - self.ema_alpha) * self.cam_vx_ema + self.ema_alpha * vx
-        self.cam_vy_ema = (1 - self.ema_alpha) * self.cam_vy_ema + self.ema_alpha * vy
+        self.bg_vx_ema = (1 - self.ema_alpha) * self.bg_vx_ema + self.ema_alpha * bg_vx
+        self.bg_vy_ema = 0.0  # Always zero for horizontal scrollers
         
-        return self.cam_vx_ema, self.cam_vy_ema
+        return self.bg_vx_ema, self.bg_vy_ema
     
-    def _segment_moving_objects(self, flow, cam_vx, cam_vy):
-        """Segment moving objects by removing camera motion from flow."""
-        # Calculate residual flow (flow - camera motion)
+    def _segment_moving_objects(self, flow, bg_vx, bg_vy):
+        """Segment moving objects by removing background flow."""
+        # Calculate residual flow (flow - background flow)
         residual = flow.copy()
-        residual[..., 0] -= cam_vx
-        residual[..., 1] -= cam_vy
+        residual[..., 0] -= bg_vx
+        residual[..., 1] -= bg_vy
         
         # Calculate magnitude of residual flow
         magnitude = np.linalg.norm(residual, axis=2)
@@ -247,48 +325,73 @@ class FlowBasedTracker:
         
         return vx, vy
     
-    def _identify_mario(self, components, prev_mario_bbox):
-        """Identify Mario from detected components."""
+    def _identify_mario(self, components, prev_mario_bbox, residual_flow=None):
+        """Identify Mario from detected components using vertical residual flow."""
         if not components:
             return None
+        
+        # Get screen dimensions for band calculation
+        H, W = 240, 256  # Standard NES resolution
+        if residual_flow is not None:
+            H, W = residual_flow.shape[:2]
             
-        if prev_mario_bbox is None:
-            # First frame: use heuristics based on size and position
+        # Define left-center band where Mario typically appears (27%-55% of screen width)
+        band_l = int(0.27 * W)  # ~70px for 256px width
+        band_r = int(0.55 * W)  # ~140px for 256px width
+        
+        if prev_mario_bbox is None or residual_flow is None:
+            # First frame or no residual flow: fallback to position-based heuristic
             scored_components = []
             for (x, y, w, h, area) in components:
+                cx = x + w / 2
+                # Prioritize components in the Mario band
+                if band_l <= cx <= band_r:
+                    band_bonus = 100
+                else:
+                    band_bonus = 0
+                    
                 # Size score (prefer Mario-like sprite size)
                 size_score = -abs(h - self.mario_sprite_size[1]) - abs(w - self.mario_sprite_size[0])
                 
-                # Position score (prefer left side of screen)
-                pos_score = -(x - self.mario_initial_x_bias) ** 2 * 1e-3
-                
-                total_score = size_score + pos_score
+                total_score = size_score + band_bonus
                 scored_components.append((total_score, (x, y, w, h)))
             
-            # Return highest scoring component
-            scored_components.sort(reverse=True, key=lambda t: t[0])
-            return scored_components[0][1]
+            if scored_components:
+                scored_components.sort(reverse=True, key=lambda t: t[0])
+                return scored_components[0][1]
+            return None
         
-        else:
-            # Subsequent frames: use nearest neighbor to previous Mario position
-            prev_x, prev_y, prev_w, prev_h = prev_mario_bbox
-            prev_center_x = prev_x + prev_w / 2
-            prev_center_y = prev_y + prev_h / 2
-            
-            best_component = None
-            min_distance_sq = float('inf')
-            
-            for (x, y, w, h, area) in components:
-                center_x = x + w / 2
-                center_y = y + h / 2
+        # Use vertical residual flow for Mario identification
+        best_component = None
+        best_score = -1e9
+        
+        for (x, y, w, h, area) in components:
+            cx = x + w / 2
+            # Prioritize components in Mario's typical screen band
+            if not (band_l <= cx <= band_r):
+                continue
                 
-                distance_sq = (center_x - prev_center_x) ** 2 + (center_y - prev_center_y) ** 2
+            # Calculate residual flow scores in this component's region
+            roi = residual_flow[y:y+h, x:x+w]
+            if roi.size == 0:
+                continue
                 
-                if distance_sq < min_distance_sq:
-                    min_distance_sq = distance_sq
-                    best_component = (x, y, w, h)
+            # Mario has strong vertical motion (jumping, falling)
+            vscore = np.mean(np.abs(roi[..., 1]))  # |vy_residual|
+            # Enemies typically have more horizontal motion
+            hscore = np.mean(np.abs(roi[..., 0]))  # |vx_residual|
             
-            return best_component
+            # Size penalty (prefer Mario-sized objects)
+            size_penalty = 0.02 * (abs(h - 28) + abs(w - 18))
+            
+            # Mario score: high vertical motion, low horizontal motion, good size
+            score = vscore - 0.5 * hscore - size_penalty
+            
+            if score > best_score:
+                best_score = score
+                best_component = (x, y, w, h)
+        
+        return best_component
     
     def _static_wall_ahead(self, gray, mario_bbox):
         """Detect static walls/obstacles ahead of Mario using edge density analysis."""
@@ -375,34 +478,33 @@ class FlowBasedTracker:
             self.prev_gray = gray
             return result
         
-        # Calculate optical flow using Farneback method
-        flow = cv2.calcOpticalFlowFarneback(
-            self.prev_gray, gray, None, **self.flow_params
-        )
+        # Calculate optical flow using GPU or CPU optimized method
+        flow = self._calculate_optical_flow_optimized(self.prev_gray, gray)
         
-        # Estimate camera movement (pass previous Mario bbox to avoid contamination)
-        cam_vx, cam_vy = self._estimate_camera_flow(flow, self.mario_bbox)
+        # Estimate background flow (pass previous Mario bbox to avoid contamination)
+        bg_vx, bg_vy = self._estimate_camera_flow(flow, self.mario_bbox)
         
-        # Update cumulative camera position
-        self.cam_x += cam_vx
-        self.cam_y += cam_vy
+        # Update cumulative camera position (camera moves opposite to background flow)
+        self.cam_x += -bg_vx  # Camera position in world coordinates
+        self.cam_y += -bg_vy
         
         # Segment moving objects
-        motion_mask, residual_flow = self._segment_moving_objects(flow, cam_vx, cam_vy)
+        motion_mask, residual_flow = self._segment_moving_objects(flow, bg_vx, bg_vy)
         
         # Find connected components
         components = self._find_connected_components(motion_mask)
         
         # Identify Mario
-        mario_bbox = self._identify_mario(components, self.mario_bbox)
+        mario_bbox = self._identify_mario(components, self.mario_bbox, residual_flow)
         
         if mario_bbox is not None:
             # Calculate Mario's screen velocity
             mario_vx_screen, mario_vy_screen = self._calculate_mean_flow_in_bbox(flow, mario_bbox)
             
             # Calculate world velocity (relative to stationary background)
-            mario_vx_world = mario_vx_screen + cam_vx
-            mario_vy_world = mario_vy_screen + cam_vy
+            # v_world = v_screen - bg_flow_v
+            mario_vx_world = mario_vx_screen - bg_vx
+            mario_vy_world = mario_vy_screen - bg_vy
             
             # Calculate acceleration
             mario_ax = (mario_vx_world - self.prev_mario_v[0]) / self.dt
@@ -431,26 +533,50 @@ class FlowBasedTracker:
             
             # Calculate object velocities
             obj_vx_screen, obj_vy_screen = self._calculate_mean_flow_in_bbox(flow, (x, y, w, h))
-            obj_vx_world = obj_vx_screen + cam_vx
-            obj_vy_world = obj_vy_screen + cam_vy
+            obj_vx_world = obj_vx_screen - bg_vx
+            obj_vy_world = obj_vy_screen - bg_vy
+            
+            # Calculate horizontal residual motion score (enemies typically move horizontally)
+            roi_residual = residual_flow[y:y+h, x:x+w]
+            if roi_residual.size > 0:
+                horizontal_score = np.mean(np.abs(roi_residual[..., 0]))  # |vx_residual|
+            else:
+                horizontal_score = 0.0
             
             other_objects.append({
                 "bbox": (x, y, w, h),
                 "v_screen": (obj_vx_screen, obj_vy_screen),
-                "v_world": (obj_vx_world, obj_vy_world)
+                "v_world": (obj_vx_world, obj_vy_world),
+                "horizontal_score": horizontal_score
             })
         
-        # Limit number of tracked objects (keep largest by area)
-        other_objects.sort(key=lambda obj: obj["bbox"][2] * obj["bbox"][3], reverse=True)
+        # Prioritize objects with strong horizontal motion (likely enemies)
+        other_objects.sort(key=lambda obj: obj["horizontal_score"], reverse=True)
         result["objects"] = other_objects[:8]
         
-        # Update result with camera info
-        result["camera_v"] = (cam_vx, cam_vy)
+        # Update result with flow and camera info
+        result["bg_flow_v"] = (bg_vx, bg_vy)  # Background flow (left negative)
+        result["camera_v"] = (-bg_vx, -bg_vy)  # Camera velocity (right positive)
         result["camera_xy"] = (self.cam_x, self.cam_y)
         
         # Add static obstacle detection
         result["static_wall_ahead"] = self._static_wall_ahead(gray, mario_bbox)
         result["gap_ahead"] = self._gap_ahead(gray, mario_bbox)
+        
+        # Background-only horizontal static detection (Mario-independent)
+        abs_fx = np.abs(flow[..., 0])  # Horizontal flow magnitude
+        moving_ratio_x = float((abs_fx > 0.08).mean())  # Pixels with horizontal motion
+        scene_static_x = (moving_ratio_x < 0.003) and (abs(bg_vx) < 0.03)
+        
+        # Legacy scene static (all directions)
+        mag = np.linalg.norm(flow, axis=2)
+        moving_ratio = float((mag > 0.08).mean())
+        scene_static = (moving_ratio < 0.002) and (abs(bg_vx) < 0.03)
+        
+        result["scene_moving_ratio"] = moving_ratio
+        result["scene_static"] = scene_static
+        result["moving_ratio_x"] = moving_ratio_x
+        result["scene_static_x"] = scene_static_x
         
         # Store current frame for next iteration
         self.prev_gray = gray
@@ -535,6 +661,156 @@ class StaticMapMemory:
         """統計情報を返す"""
         return {"gaps": len(self.gaps), "walls": len(self.walls)}
 
+class KinematicStateEstimator:
+    """
+    マリオのキネマティック状態をリアルタイム推定
+    - 光学フローから v_world, a を取得
+    - 接地判定と組み合わせて詳細な運動状態を分類
+    """
+    def __init__(self, fps=60):
+        self.dt = 1.0 / max(1, fps)
+        self.prev_on_ground = False
+        self.on_ground_frames = 0
+        self.air_frames = 0
+        self.state = "Init"
+        self.prev_bottom_y = None
+        self.time_in_state = 0
+        self.prev_v = (0.0, 0.0)
+        self.stuck_frames = 0
+        
+        # 閾値（px/frame基準）
+        self.vx_idle = 0.12
+        self.vx_walk = 0.5
+        self.vx_dash = 1.6
+        self.vy_up_thr = 0.35
+        self.vy_apex_thr = 0.25
+        self.vy_down_thr = 0.35
+        self.skid_ax_thr = 0.12
+        self.stuck_limit = 1200#90
+    
+    def _desired_dir(self, action_idx, actions):
+        """アクションから入力方向を推定"""
+        if action_idx >= len(actions):
+            return 0
+        cmds = actions[action_idx]
+        if 'right' in cmds:
+            return 1
+        if 'left' in cmds:
+            return -1
+        return 0
+    
+    def _on_ground_update(self, mario):
+        """接地判定更新"""
+        if not mario:
+            self.on_ground_frames = 0
+            self.prev_bottom_y = None
+            return False
+        x, y, w, h = mario['bbox']
+        bottom_y = y + h
+        vy = mario['v_world'][1]
+        if self.prev_bottom_y is not None and abs(bottom_y - self.prev_bottom_y) <= 1 and abs(vy) < 0.3:
+            self.on_ground_frames += 1
+        else:
+            self.on_ground_frames = 0
+        self.prev_bottom_y = bottom_y
+        return self.on_ground_frames >= 2
+    
+    def _power_from_env_or_bbox(self, info, mario):
+        """パワー状態を環境情報またはbboxから推定"""
+        s = info.get('status')
+        if s in ('small', 'tall', 'fireball'):
+            return {'small': 'SMALL', 'tall': 'BIG', 'fireball': 'FIRE'}[s]
+        # fallback: bbox高さで推定（粗い）
+        if mario:
+            h = mario['bbox'][3]
+            if h < 24:
+                return 'SMALL?'
+            else:
+                return 'BIG/FIRE?'
+        return 'UNKNOWN'
+    
+    def update(self, flow_est, info, action_idx, actions):
+        """キネマティック状態を更新して返す"""
+        mario = flow_est.get('mario')
+        if not mario:
+            self.time_in_state = 0
+            return {
+                'present': False, 'phase': 'Lost', 'on_ground': False,
+                'vx': 0.0, 'vy': 0.0, 'ax': 0.0, 'ay': 0.0,
+                'power': self._power_from_env_or_bbox(info, None),
+                'x_pos': float(info.get('x_pos', 0.0)), 'y_pos': float(info.get('y_pos', 0.0)),
+                'speed': 0.0, 'time_in_state': 0, 'desired_dir': 0
+            }
+        
+        vx, vy = mario['v_world']
+        ax, ay = mario.get('a', (0.0, 0.0))
+        # aが無ければ差分で補完
+        if ax == 0.0 and ay == 0.0:
+            ax = (vx - self.prev_v[0]) / self.dt
+            ay = (vy - self.prev_v[1]) / self.dt
+        self.prev_v = (vx, vy)
+        
+        on_ground = self._on_ground_update(mario)
+        desired = self._desired_dir(action_idx, actions)
+        
+        # Stuckカウント
+        if on_ground and abs(vx) < 0.15:
+            self.stuck_frames += 1
+        else:
+            self.stuck_frames = 0
+        
+        # フェーズ遷移
+        phase = self.state
+        if on_ground and not self.prev_on_ground:
+            phase = 'Landing'
+            self.time_in_state = 0
+        elif not on_ground and self.prev_on_ground:
+            phase = 'Takeoff'
+            self.time_in_state = 0
+        else:
+            if on_ground:
+                if self.stuck_frames > self.stuck_limit:
+                    phase = 'Stuck'
+                elif abs(vx) < self.vx_idle:
+                    phase = 'Idle'
+                else:
+                    # スキッド（入力方向と速度が逆、かつ減速強め）
+                    if desired != 0 and vx * desired < 0 and ax < -self.skid_ax_thr:
+                        phase = 'Skid'
+                    elif abs(vx) >= self.vx_dash:
+                        phase = 'Dash'
+                    else:
+                        phase = 'Walk'
+            else:
+                if vy < -self.vy_up_thr:
+                    phase = 'Ascend'
+                elif abs(vy) <= self.vy_apex_thr:
+                    phase = 'Apex'
+                elif vy > self.vy_down_thr:
+                    phase = 'Descend'
+                else:
+                    phase = 'Air'
+        
+        if phase != self.state:
+            self.time_in_state = 0
+            self.state = phase
+        else:
+            self.time_in_state += 1
+        
+        self.prev_on_ground = on_ground
+        
+        return {
+            'present': True,
+            'phase': phase,
+            'on_ground': on_ground,
+            'vx': vx, 'vy': vy, 'ax': ax, 'ay': ay,
+            'speed': (vx**2 + vy**2) ** 0.5,
+            'time_in_state': self.time_in_state,
+            'desired_dir': desired,
+            'power': self._power_from_env_or_bbox(info, mario),
+            'x_pos': float(info.get('x_pos', 0.0)), 'y_pos': float(info.get('y_pos', 0.0))
+        }
+
 class FlowHeuristicPolicy:
     """
     Optical Flowベースの簡易ヒューリスティック戦略。
@@ -555,6 +831,10 @@ class FlowHeuristicPolicy:
         # Aボタンのリリース制御と接地エッジ検出用
         self.release_a_frames = 0
         self.prev_on_ground = False
+        
+        # マリオ非依存のグローバル静止検出とリカバリ
+        self.global_static_x_frames = 0
+        self.recovery_cooldown = 0
 
         # 閾値
         self.vx_slow = 0.5       # v_world_x がこの値未満だと減速/詰まり傾向
@@ -563,7 +843,7 @@ class FlowHeuristicPolicy:
         self.obstacle_dy_tol = 10    # 足元高さの重なり許容
         self.min_jump_hold = 6
         self.max_jump_hold = 14
-        self.stuck_limit = 120    # 連続フレーム数（~2.0秒）で詰まり判定
+        self.stuck_limit = 1200    # 連続フレーム数（~2.0秒）で詰まり判定
 
     def reset(self):
         self.jump_hold = 0
@@ -572,6 +852,8 @@ class FlowHeuristicPolicy:
         self.stuck_frames = 0
         self.release_a_frames = 0
         self.prev_on_ground = False
+        self.global_static_x_frames = 0
+        self.recovery_cooldown = 0
 
     def _best(self, labels):
         # 与えた候補ラベル列から、利用可能な最初のものを返す
@@ -645,6 +927,27 @@ class FlowHeuristicPolicy:
         # on_ground を先に更新（エッジ検出のため）
         on_ground = self._on_ground_update(mario)
 
+        # マリオ非依存の背景静止検出による強制リカバリ
+        scene_static_x = bool(flow_estimates.get("scene_static_x", False))
+        
+        # クールダウン管理
+        if self.recovery_cooldown > 0:
+            self.recovery_cooldown -= 1
+        
+        # 背景の横静止を積分（マリオ検出不要）
+        if scene_static_x and self.recovery_cooldown == 0:
+            self.global_static_x_frames += 1
+        else:
+            self.global_static_x_frames = 0
+        
+        # 連続10フレーム（約0.17秒）の背景静止で大ジャンプ発火
+        if self.global_static_x_frames >= 10 and self.release_a_frames == 0 and self.jump_hold == 0:
+            # 1フレームAを離してから最大保持でジャンプ
+            self.release_a_frames = 1
+            self.jump_hold = self.max_jump_hold  # 14フレーム大ジャンプ
+            self.recovery_cooldown = 45  # 0.75秒の再発抑制
+            self.global_static_x_frames = 0  # カウンターリセット
+        
         # 空中→接地の立ち上がりで A を1フレーム離す
         if on_ground and not self.prev_on_ground:
             self.release_a_frames = max(self.release_a_frames, 1)
@@ -727,7 +1030,7 @@ class FlowHeuristicPolicy:
 
 # UI constants
 SCREEN_WIDTH = 1024
-SCREEN_HEIGHT = 640
+SCREEN_HEIGHT = 800  # Increased from 640 to fit all info lines
 
 GAME_SCREEN_BASE_WIDTH = 256
 GAME_SCREEN_BASE_HEIGHT = 240
@@ -877,9 +1180,11 @@ class GoExploreUIRunner:
         cell_size_x: int = 50,
         cell_size_y: int = 40,
         max_steps_per_episode: int = 6000,
-        stuck_frame_window: int = 60,
+        stuck_frame_window: int = 1200,  # Increased from 60 to match policy stuck_limit
         save_every_episodes: int = 10,
         target_fps: int = 60,
+        use_gpu: bool = True,
+        num_threads: Optional[int] = None,
     ):
         self.stage = stage
         self.archive_path = archive_path
@@ -893,6 +1198,8 @@ class GoExploreUIRunner:
 
 
         self.target_fps = target_fps
+        self.use_gpu = use_gpu
+        self.num_threads = num_threads
 
         # Environment
         self.env = make_env(stage, actions)
@@ -918,8 +1225,13 @@ class GoExploreUIRunner:
         self.prev_x_deque = deque(maxlen=self.stuck_frame_window)
 
 
-        # Optical flow tracker
-        self.flow_tracker = FlowBasedTracker(fps=target_fps, hud_height=40)
+        # Optical flow tracker with performance optimizations
+        self.flow_tracker = FlowBasedTracker(
+            fps=target_fps, 
+            hud_height=40,
+            use_gpu=self.use_gpu,
+            num_threads=self.num_threads
+        )
         self.last_flow_estimates = {}
         
         # Learning systems
@@ -932,6 +1244,10 @@ class GoExploreUIRunner:
             self.actions, self.action_indices, target_fps, 
             failure_memory=self.failure_memory, static_map=self.static_map
         )
+        
+        # Kinematic state estimator
+        self.kin = KinematicStateEstimator(target_fps)
+        self.last_kin_state = {}
 
         # UI
         self._init_pygame()
@@ -1009,30 +1325,49 @@ class GoExploreUIRunner:
             f"Stage: {self.stage} | Mode: {mode_str} | {clear_status}",
             f"Ep: {self.episodes_done} | BestX: {self.best_overall_x} | Cells: {len(self.archive)}",
             f"EpMaxX: {self.ep_max_x} | CurrX: {x} | Time: {time_left} | Flag: {flag}",
+            f"Status: {str(self.last_info.get('status', '?'))}",
             f"PathLen: {len(self.current_path)} | FailureMem: {len(self.failure_memory.hazards)} | StaticMap: G{len(self.static_map.gaps)}W{len(self.static_map.walls)}",
             f"Action: {'+'.join(self.actions[action_idx])}",
         ]
         
-        # Optical flow info
+        # Optical flow and kinematic state info
         if self.last_flow_estimates:
             cam_vx, cam_vy = self.last_flow_estimates.get("camera_v", (0.0, 0.0))
             cam_x, cam_y = self.last_flow_estimates.get("camera_xy", (0.0, 0.0))
+            moving_ratio = self.last_flow_estimates.get("scene_moving_ratio", 0.0)
+            scene_static = self.last_flow_estimates.get("scene_static", False)
+            info_lines.append(f"Camera V: ({cam_vx:.2f}, {cam_vy:.2f}) px/f | Pos: ({cam_x:.1f}, {cam_y:.1f})")
             
+            # Mario velocity/acceleration from optical flow
             mario_info = self.last_flow_estimates.get("mario")
             if mario_info:
                 mario_vx, mario_vy = mario_info["v_world"]
-                mario_ax, mario_ay = mario_info["a"]
-                info_lines.extend([
-                    f"Camera V: ({cam_vx:.2f}, {cam_vy:.2f}) px/f | Pos: ({cam_x:.1f}, {cam_y:.1f})",
-                    f"Mario V_world: ({mario_vx:.2f}, {mario_vy:.2f}) | A: ({mario_ax:.2f}, {mario_ay:.2f})",
-                ])
+                mario_ax, mario_ay = mario_info.get("a", (0.0, 0.0))
+                info_lines.append(f"Mario V_world: ({mario_vx:.2f}, {mario_vy:.2f}) px/f | A: ({mario_ax:.2f}, {mario_ay:.2f}) px/f²")
             else:
-                info_lines.append(f"Camera V: ({cam_vx:.2f}, {cam_vy:.2f}) px/f | Mario: Not detected")
-                
+                info_lines.append("Mario: Not detected by optical flow")
+            
+            # Background flow analysis
+            moving_ratio_x = self.last_flow_estimates.get("moving_ratio_x", 0.0)
+            scene_static_x = self.last_flow_estimates.get("scene_static_x", False)
+            bg_vx, bg_vy = self.last_flow_estimates.get("bg_flow_v", (0.0, 0.0))
+            
             num_objects = len(self.last_flow_estimates.get("objects", []))
-            info_lines.append(f"Other objects detected: {num_objects}")
+            info_lines.append(f"Objects: {num_objects} | BG_flow: ({bg_vx:.3f}, {bg_vy:.3f}) | MovingX: {moving_ratio_x:.4f} | StaticX: {scene_static_x}")
         else:
             info_lines.append("Optical flow: Initializing...")
+            
+        # Detailed kinematic state info
+        if self.last_kin_state:
+            ks = self.last_kin_state
+            if ks.get('present', False):
+                info_lines.append(f"Power: {ks.get('power','?')} | Phase: {ks.get('phase','?')} | on_ground={ks.get('on_ground',False)}")
+                info_lines.append(f"v=({ks.get('vx',0):.2f},{ks.get('vy',0):.2f}) a=({ks.get('ax',0):.2f},{ks.get('ay',0):.2f}) | t_state={ks.get('time_in_state',0)}")
+                info_lines.append(f"speed={ks.get('speed',0):.2f} | desired_dir={ks.get('desired_dir',0)} | pos=({ks.get('x_pos',0):.1f},{ks.get('y_pos',0):.1f})")
+            else:
+                info_lines.append("Mario: Not detected by kinematic estimator")
+        else:
+            info_lines.append("Kinematic state: Initializing...")
             
         info_lines.append("Keys: R=Reset episode / S=Save archive / L=Load archive / ESC=Quit / P=Pause")
         
@@ -1040,7 +1375,7 @@ class GoExploreUIRunner:
         y = GAME_SCREEN_RECT.bottom + 10
         for i, line in enumerate(info_lines):
             # Use different color for optical flow info
-            color = FLOW_INFO_COLOR if "Camera V:" in line or "Mario V_world:" in line or "objects detected:" in line else TEXT_COLOR
+            color = FLOW_INFO_COLOR if any(kw in line for kw in ["Camera V:", "objects detected:", "Power:", "v=(", "speed=", "Mario:", "Kinematic"]) else TEXT_COLOR
             text = self.font_small.render(line, True, color)
             self.screen.blit(text, (GAME_SCREEN_X, y))
             y += 20
@@ -1232,6 +1567,8 @@ class GoExploreUIRunner:
             self._push_flow_history(self.last_flow_estimates, info)
             # 静的マップ観測
             self.static_map.observe(info.get('x_pos', 0), self.last_flow_estimates)
+            # キネマティック状態更新
+            self.last_kin_state = self.kin.update(self.last_flow_estimates, info, action_idx, self.actions)
 
             # Bookkeeping
             self.current_path.append(action_idx)
@@ -1315,6 +1652,8 @@ def main():
     parser.add_argument("--seed", type=int, default=None, help="Random seed")
     parser.add_argument("--fps", type=int, default=60, help="Target FPS for UI")
     parser.add_argument("--max-steps", type=int, default=6000, help="Max steps per episode")
+    parser.add_argument("--no-gpu", action="store_true", help="Disable GPU acceleration for optical flow")
+    parser.add_argument("--threads", type=int, default=None, help="Number of CPU threads for OpenCV (default: auto)")
     args = parser.parse_args()
 
     # Create pkl directory if it doesn't exist
@@ -1334,6 +1673,12 @@ def main():
     print("  - Other moving object detection")
     print("  - Visual overlay showing tracked objects")
 
+    # Performance info
+    if not args.no_gpu:
+        print("  - GPU acceleration enabled (if available)")
+    else:
+        print("  - GPU acceleration disabled")
+    
     runner = GoExploreUIRunner(
         stage=args.stage,
         archive_path=archive_path,
@@ -1341,6 +1686,8 @@ def main():
         seed=args.seed,
         max_steps_per_episode=args.max_steps,
         target_fps=args.fps,
+        use_gpu=not args.no_gpu,
+        num_threads=args.threads,
     )
     runner.run(max_episodes=args.episodes)
 
