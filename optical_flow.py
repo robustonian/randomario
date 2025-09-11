@@ -835,6 +835,10 @@ class FlowHeuristicPolicy:
         # マリオ非依存のグローバル静止検出とリカバリ
         self.global_static_x_frames = 0
         self.recovery_cooldown = 0
+        
+        # 入力ベースのスタック検出（期待背景フロー vs 実際のフロー）
+        self.input_stuck_frames = 0
+        self.prev_action_was_right = False
 
         # 閾値
         self.vx_slow = 0.5       # v_world_x がこの値未満だと減速/詰まり傾向
@@ -844,6 +848,8 @@ class FlowHeuristicPolicy:
         self.min_jump_hold = 6
         self.max_jump_hold = 14
         self.stuck_limit = 1200    # 連続フレーム数（~2.0秒）で詰まり判定
+        self.input_stuck_limit = 60  # 入力ベーススタック判定（1秒）
+        self.bg_flow_threshold = 0.15  # 期待される最小背景フロー速度
 
     def reset(self):
         self.jump_hold = 0
@@ -854,6 +860,8 @@ class FlowHeuristicPolicy:
         self.prev_on_ground = False
         self.global_static_x_frames = 0
         self.recovery_cooldown = 0
+        self.input_stuck_frames = 0
+        self.prev_action_was_right = False
 
     def _best(self, labels):
         # 与えた候補ラベル列から、利用可能な最初のものを返す
@@ -926,6 +934,23 @@ class FlowHeuristicPolicy:
 
         # on_ground を先に更新（エッジ検出のため）
         on_ground = self._on_ground_update(mario)
+        
+        # 入力ベースのスタック検出：期待背景フロー vs 実際のフロー
+        bg_vx, bg_vy = flow_estimates.get("bg_flow_v", (0.0, 0.0))
+        
+        # 前フレームが右入力で、背景が期待通り左に流れていないかチェック
+        input_stuck = False
+        if self.prev_action_was_right:
+            # 右を押していたなら背景は左に流れるはず（bg_vx < -threshold）
+            if bg_vx > -self.bg_flow_threshold:  # 左に十分流れていない
+                self.input_stuck_frames += 1
+                if self.input_stuck_frames >= self.input_stuck_limit:
+                    input_stuck = True
+            else:
+                self.input_stuck_frames = 0  # 正常に動いているのでリセット
+        else:
+            # 右入力でない場合はカウンターリセット
+            self.input_stuck_frames = 0
 
         # マリオ非依存の背景静止検出による強制リカバリ
         scene_static_x = bool(flow_estimates.get("scene_static_x", False))
@@ -940,8 +965,16 @@ class FlowHeuristicPolicy:
         else:
             self.global_static_x_frames = 0
         
-        # 連続10フレーム（約0.17秒）の背景静止で大ジャンプ発火
-        if self.global_static_x_frames >= 10 and self.release_a_frames == 0 and self.jump_hold == 0:
+        # 入力ベーススタック検出による早期リカバリ（優先度高）
+        if input_stuck and self.release_a_frames == 0 and self.jump_hold == 0:
+            # 入力に対する応答がない＝壁にぶつかっているので大ジャンプ
+            self.release_a_frames = 1
+            self.jump_hold = self.max_jump_hold  # 14フレーム大ジャンプ
+            self.recovery_cooldown = 30  # 0.5秒の再発抑制
+            self.input_stuck_frames = 0  # カウンターリセット
+        
+        # 連続10フレーム（約0.17秒）の背景静止で大ジャンプ発火（フォールバック）
+        elif self.global_static_x_frames >= 10 and self.release_a_frames == 0 and self.jump_hold == 0:
             # 1フレームAを離してから最大保持でジャンプ
             self.release_a_frames = 1
             self.jump_hold = self.max_jump_hold  # 14フレーム大ジャンプ
@@ -953,22 +986,26 @@ class FlowHeuristicPolicy:
             self.release_a_frames = max(self.release_a_frames, 1)
             self.jump_hold = 0  # 押しっぱなし残留をクリア
 
+        # 以下の早期リターンではアクション記録を追加
+        def _record_action_and_return(action):
+            action_commands = self.actions[action] if action < len(self.actions) else []
+            self.prev_action_was_right = 'right' in action_commands
+            self.prev_on_ground = on_ground
+            return action
+
         # Aリリース優先（このフレームはAなしの右行動）
         if self.release_a_frames > 0:
             self.release_a_frames -= 1
-            self.prev_on_ground = on_ground
-            return self._right()
+            return _record_action_and_return(self._right())
 
         # 既にジャンプ保持中なら継続
         if self.jump_hold > 0:
             self.jump_hold -= 1
-            self.prev_on_ground = on_ground
-            return self._right_jump()
+            return _record_action_and_return(self._right_jump())
 
         # マリオ未検出時は右ダッシュ
         if not mario:
-            self.prev_on_ground = on_ground
-            return self._right()
+            return _record_action_and_return(self._right())
 
         vx, vy = mario['v_world']
 
@@ -987,8 +1024,7 @@ class FlowHeuristicPolicy:
                         # 速度が高ければ少し増やす
                         hold = int(base_hold + min(4, max(0.0, vx) * 2))
                         self.jump_hold = max(self.jump_hold, min(self.max_jump_hold, hold))
-                        self.prev_on_ground = on_ground
-                        return self._right_jump()
+                        return _record_action_and_return(self._right_jump())
             
             # 静的マップからの予防ジャンプ
             if self.sm is not None and on_ground:
@@ -996,8 +1032,7 @@ class FlowHeuristicPolicy:
                     # 静的障害物用の標準ジャンプ
                     hold = int(self.min_jump_hold + 4)  # 少し長めに
                     self.jump_hold = max(self.jump_hold, hold)
-                    self.prev_on_ground = on_ground
-                    return self._right_jump()
+                    return _record_action_and_return(self._right_jump())
 
         # 詰まり検出
         if abs(vx) < 0.2 and on_ground:
@@ -1008,8 +1043,7 @@ class FlowHeuristicPolicy:
         # 落下中なら滞空延長
         if not on_ground and vy > self.fall_vy:
             self.jump_hold = max(self.jump_hold, 4)
-            self.prev_on_ground = on_ground
-            return self._right_jump()
+            return _record_action_and_return(self._right_jump())
 
         # 障害物や減速兆候でジャンプ開始
         obstacle = self._obstacle_ahead(mario, objects, flow_estimates)
@@ -1017,16 +1051,21 @@ class FlowHeuristicPolicy:
             hold = int(self.min_jump_hold + (self.max_jump_hold - self.min_jump_hold) * max(0.0, min(1.0, vx / 2.5)))
             self.jump_hold = max(self.jump_hold, hold)
             self.stuck_frames = 0
-            self.prev_on_ground = on_ground
-            return self._right_jump()
+            return _record_action_and_return(self._right_jump())
 
         # 微調整
         if on_ground and vx < 0.25 and not obstacle:
-            self.prev_on_ground = on_ground
-            return self._left() if 'LEFT' in self.a else self._right()
+            return _record_action_and_return(self._left() if 'LEFT' in self.a else self._right())
 
+        # 最終アクション決定
+        action = self._right()
+        
+        # 次フレーム用に今回のアクションを記録（右入力だったかどうか）
+        action_commands = self.actions[action] if action < len(self.actions) else []
+        self.prev_action_was_right = 'right' in action_commands
+        
         self.prev_on_ground = on_ground
-        return self._right()
+        return action
 
 # UI constants
 SCREEN_WIDTH = 1024
@@ -1354,6 +1393,12 @@ class GoExploreUIRunner:
             
             num_objects = len(self.last_flow_estimates.get("objects", []))
             info_lines.append(f"Objects: {num_objects} | BG_flow: ({bg_vx:.3f}, {bg_vy:.3f}) | MovingX: {moving_ratio_x:.4f} | StaticX: {scene_static_x}")
+            
+            # 入力ベーススタック検出情報
+            input_stuck_frames = getattr(self.flow_policy, 'input_stuck_frames', 0)
+            input_stuck_limit = getattr(self.flow_policy, 'input_stuck_limit', 60)
+            prev_action_was_right = getattr(self.flow_policy, 'prev_action_was_right', False)
+            info_lines.append(f"Input-based stuck: {input_stuck_frames}/{input_stuck_limit} | prev_right: {prev_action_was_right}")
         else:
             info_lines.append("Optical flow: Initializing...")
             
