@@ -586,36 +586,49 @@ class FlowBasedTracker:
 class FailureMemory:
     """
     失敗地点の学習システム。X座標をビン分割して死因別の対策を記録・活用。
+    - 二択ジャンプ（big/small）で制御
+    - 記録を前方にオフセットして次回確実にトリガに入る
     """
-    def __init__(self, bin_size=50):
+    def __init__(self, bin_size=24, record_forward_px=20):
         self.bin_size = bin_size
+        self.record_forward_px = record_forward_px
         self.hazards = {}  # key: x_bin -> dict
 
     def _key(self, x):
         return int(x // self.bin_size)
 
     def record(self, x_pos, cause, ctx=None):
-        """失敗を記録し、対策パラメータを更新"""
-        k = self._key(x_pos)
+        # 障害物の前縁を狙って少し前方にずらして記録
+        x_eff = float(x_pos) + float(self.record_forward_px)
+        k = self._key(x_eff)
         h = self.hazards.get(k, {
             'type': cause,
             'count': 0,
-            'min_hold': 8,        # 推奨ジャンプ保持の下限
-            'dx_trigger': 56,     # どの距離から事前作動するか（px相当）
+            'jump': 'big',       # デフォルトは BIG（安全側）
+            'dx_trigger': 72,    # 早めに発火（後で増やす）
+            'pre_release': 1,
             'updated_at': time.time()
         })
         h['type'] = cause
-        h['count'] += 1
-        # 失敗が続くと保持時間を少しずつ増やす
-        if cause in ('FALL_GAP', 'ENEMY_COLLISION'):
-            h['min_hold'] = min(18, h.get('min_hold', 8) + 2)
-        elif cause == 'STUCK':
-            h['dx_trigger'] = max(30, h.get('dx_trigger', 56) - 10)  # より早めの対応
+        h['count'] = h.get('count', 0) + 1
+
+        # 死因別の強化ルール（UNKNOWN でも BIG 側へ寄せる）
+        if cause in ('FALL_GAP', 'WALL_OR_OTHER', 'STUCK', 'UNKNOWN'):
+            h['jump'] = 'big'
+            h['dx_trigger'] = min(110, h.get('dx_trigger', 72) + 10)
+            h['pre_release'] = max(1, h.get('pre_release', 1))
+        elif cause == 'ENEMY_COLLISION':
+            # 敵は小で済むこともあるが、2回以上続けば BIG に昇格
+            if h['count'] >= 2:
+                h['jump'] = 'big'
+            else:
+                h['jump'] = 'small'
+            h['dx_trigger'] = min(90, h.get('dx_trigger', 72) + 8)
+
         h['updated_at'] = time.time()
         self.hazards[k] = h
 
-    def query_ahead(self, x_pos, lookahead_bins=3):
-        """現在位置から前方のビンをスキャンして最初のハザードを返す"""
+    def query_ahead(self, x_pos, lookahead_bins=5):
         k = self._key(x_pos)
         for d in range(0, lookahead_bins + 1):
             kk = k + d
@@ -623,6 +636,15 @@ class FailureMemory:
                 hx = kk * self.bin_size
                 return hx, self.hazards[kk]
         return None, None
+
+    def mark_passed(self, x_pos):
+        k = self._key(x_pos)
+        if k in self.hazards:
+            h = self.hazards[k]
+            h['count'] = max(0, h.get('count', 0) - 1)
+            h['dx_trigger'] = max(48, h.get('dx_trigger', 72) - 6)
+            h['updated_at'] = time.time()
+            self.hazards[k] = h
 
 class StaticMapMemory:
     """
@@ -828,8 +850,7 @@ class FlowHeuristicPolicy:
         self.ground_frames = 0
         self.last_bottom_y = None
         self.stuck_frames = 0
-        # Aボタンのリリース制御と接地エッジ検出用
-        self.release_a_frames = 0
+        # 接地エッジ検出用
         self.prev_on_ground = False
         
         # マリオ非依存のグローバル静止検出とリカバリ
@@ -839,14 +860,20 @@ class FlowHeuristicPolicy:
         # 入力ベースのスタック検出（期待背景フロー vs 実際のフロー）
         self.input_stuck_frames = 0
         self.prev_action_was_right = False
+        
+        # 二択ジャンプシステム
+        self.SMALL_HOLD = 15   # 小ジャンプ：短時間のボタン押下
+        self.BIG_HOLD = 30     # 大ジャンプ：長時間のボタン押下
+        self.hazard_cooldown = {}  # key: hazard_bin -> frames
+        self.pre_release_frames_default = 1
 
         # 閾値
         self.vx_slow = 0.5       # v_world_x がこの値未満だと減速/詰まり傾向
         self.fall_vy = 0.6       # v_world_y がこの値より大きい（下向き）と落下中
-        self.obstacle_dx = (10, 48)  # マリオの右端から前方 dx 範囲を障害物候補
+        self.obstacle_dx = (12, 64)  # 前方検出距離の調整（動的は近め、静的は早めに）
         self.obstacle_dy_tol = 10    # 足元高さの重なり許容
-        self.min_jump_hold = 6
-        self.max_jump_hold = 14
+        self.min_jump_hold = self.SMALL_HOLD
+        self.max_jump_hold = self.BIG_HOLD
         self.stuck_limit = 1200    # 連続フレーム数（~2.0秒）で詰まり判定
         self.input_stuck_limit = 60  # 入力ベーススタック判定（1秒）
         self.bg_flow_threshold = 0.15  # 期待される最小背景フロー速度
@@ -856,12 +883,12 @@ class FlowHeuristicPolicy:
         self.ground_frames = 0
         self.last_bottom_y = None
         self.stuck_frames = 0
-        self.release_a_frames = 0
         self.prev_on_ground = False
         self.global_static_x_frames = 0
         self.recovery_cooldown = 0
         self.input_stuck_frames = 0
         self.prev_action_was_right = False
+        self.hazard_cooldown.clear()
 
     def _best(self, labels):
         # 与えた候補ラベル列から、利用可能な最初のものを返す
@@ -885,6 +912,41 @@ class FlowHeuristicPolicy:
 
     def _noop(self):
         return self._best(['NOOP'])
+
+    def _queue_jump(self, big=True, pre_rel=None):
+        """シンプルなジャンプ予約システム"""
+        new_hold = self.BIG_HOLD if big else self.SMALL_HOLD
+        
+        # 接地中のみ新規ジャンプ開始可能
+        if self.jump_hold == 0:
+            self.jump_hold = new_hold
+            jump_type = "BIG" if big else "SMALL"
+            print(f"[JUMP] Queued {jump_type} jump ({new_hold} frames)")
+            return True
+        elif big and new_hold > self.jump_hold:
+            # 既存のジャンプより高いジャンプなら上書き
+            old_hold = self.jump_hold
+            self.jump_hold = new_hold
+            print(f"[JUMP] Upgraded jump: {old_hold} -> {new_hold} frames")
+            return True
+        return False
+
+    def _moving_obstacle_ahead(self, mario, objects):
+        """動的障害物（敵など）が足元付近に接近しているかだけ判定"""
+        if not mario:
+            return False
+        mx, my, mw, mh = mario['bbox']
+        right_edge = mx + mw
+        for obj in objects:
+            ox, oy, ow, oh = obj['bbox']
+            ocx = ox + ow / 2
+            dx = ocx - right_edge
+            if dx < self.obstacle_dx[0] or dx > self.obstacle_dx[1]:
+                continue
+            # 足元付近の重なり（地上の敵）だけを対象にして誤検出を減らす
+            if oy < my + mh and oy + oh > my + mh - self.obstacle_dy_tol:
+                return True
+        return False
 
     def _on_ground_update(self, mario):
         # 簡易な接地判定：ボトムYが安定かつ垂直速度が小さい
@@ -935,6 +997,13 @@ class FlowHeuristicPolicy:
         # on_ground を先に更新（エッジ検出のため）
         on_ground = self._on_ground_update(mario)
         
+        # アクション記録用のヘルパ関数（早期定義）
+        def _record_action_and_return(action):
+            action_commands = self.actions[action] if action < len(self.actions) else []
+            self.prev_action_was_right = 'right' in action_commands
+            self.prev_on_ground = on_ground
+            return action
+
         # 入力ベースのスタック検出：期待背景フロー vs 実際のフロー
         bg_vx, bg_vy = flow_estimates.get("bg_flow_v", (0.0, 0.0))
         
@@ -966,41 +1035,58 @@ class FlowHeuristicPolicy:
             self.global_static_x_frames = 0
         
         # 入力ベーススタック検出による早期リカバリ（優先度高）
-        if input_stuck and self.release_a_frames == 0 and self.jump_hold == 0:
-            # 入力に対する応答がない＝壁にぶつかっているので大ジャンプ
-            self.release_a_frames = 1
-            self.jump_hold = self.max_jump_hold  # 14フレーム大ジャンプ
-            self.recovery_cooldown = 30  # 0.5秒の再発抑制
-            self.input_stuck_frames = 0  # カウンターリセット
-        
-        # 連続10フレーム（約0.17秒）の背景静止で大ジャンプ発火（フォールバック）
-        elif self.global_static_x_frames >= 10 and self.release_a_frames == 0 and self.jump_hold == 0:
-            # 1フレームAを離してから最大保持でジャンプ
-            self.release_a_frames = 1
-            self.jump_hold = self.max_jump_hold  # 14フレーム大ジャンプ
-            self.recovery_cooldown = 45  # 0.75秒の再発抑制
-            self.global_static_x_frames = 0  # カウンターリセット
-        
-        # 空中→接地の立ち上がりで A を1フレーム離す
-        if on_ground and not self.prev_on_ground:
-            self.release_a_frames = max(self.release_a_frames, 1)
-            self.jump_hold = 0  # 押しっぱなし残留をクリア
+        if input_stuck and self.jump_hold == 0:
+            self._queue_jump(big=True)
+            self.recovery_cooldown = 30
+            self.input_stuck_frames = 0
+            print(f"[JUMP] Input stuck recovery jump (on_ground={on_ground})")
+            return _record_action_and_return(self._right_jump())
 
-        # 以下の早期リターンではアクション記録を追加
-        def _record_action_and_return(action):
-            action_commands = self.actions[action] if action < len(self.actions) else []
-            self.prev_action_was_right = 'right' in action_commands
-            self.prev_on_ground = on_ground
-            return action
-
-        # Aリリース優先（このフレームはAなしの右行動）
-        if self.release_a_frames > 0:
-            self.release_a_frames -= 1
-            return _record_action_and_return(self._right())
+        elif self.global_static_x_frames >= 10 and self.jump_hold == 0:
+            self._queue_jump(big=True)
+            self.recovery_cooldown = 45
+            self.global_static_x_frames = 0
+            return _record_action_and_return(self._right_jump())
+        
+        # 環境から正確なマリオのy座標を取得
+        mario_y_pos = float(info.get('y_pos', 79))
+        
+        # 前フレームのy座標と比較してy速度を計算
+        prev_mario_y = getattr(self, 'prev_mario_y', mario_y_pos)
+        mario_vy_env = mario_y_pos - prev_mario_y  # 正の値=下降、負の値=上昇
+        
+        # 接地判定：y速度が0またはほぼ0（下降が止まった）
+        env_on_ground = abs(mario_vy_env) <= 1.0  # 1px/frame以下の変化なら接地
+        
+        # 前フレームと比較して接地状態の変化を検出
+        prev_env_on_ground = getattr(self, 'prev_env_on_ground', env_on_ground)
+        
+        # 状態を記録（次フレームで使用）
+        self.prev_mario_y = mario_y_pos
+        
+        # 接地時にジャンプをリセット（環境のy座標ベース）
+        if env_on_ground and not prev_env_on_ground:
+            # 接地した瞬間は現在のジャンプを終了（次のジャンプは新規に開始）
+            if self.jump_hold > 0:
+                print(f"[JUMP] Landing detected (y={mario_y_pos:.1f}, vy={mario_vy_env:.1f}), ending jump hold ({self.jump_hold} frames remaining)")
+                self.jump_hold = 0
+        
+        # 接地中にジャンプホールドが残っている場合の強制リセット
+        if env_on_ground and self.jump_hold > 0:
+            if self.jump_hold % 30 == 0:  # 30フレーム毎にログ出力
+                print(f"[JUMP] WARNING: Still holding jump while on ground (y={mario_y_pos:.1f}, vy={mario_vy_env:.1f}, {self.jump_hold} frames)")
+            # 接地中はジャンプを継続しない（マリオの物理に合わせる）
+            self.jump_hold = 0
+        
+        # 状態を記録（次フレームで使用）
+        self.prev_env_on_ground = env_on_ground
 
         # 既にジャンプ保持中なら継続
         if self.jump_hold > 0:
             self.jump_hold -= 1
+            jump_type = "BIG" if self.jump_hold >= self.SMALL_HOLD else "SMALL"
+            if self.jump_hold % 10 == 0:  # 10フレーム毎にログ出力
+                print(f"[JUMP] {jump_type} jump holding: {self.jump_hold} frames remaining")
             return _record_action_and_return(self._right_jump())
 
         # マリオ未検出時は右ダッシュ
@@ -1013,25 +1099,35 @@ class FlowHeuristicPolicy:
         if info is not None:
             x_pos = float(info.get('x_pos', 0.0))
             
-            # 失敗メモリからの回避行動
+            # 失敗メモリからの予定ジャンプ（最優先）
             if self.fm is not None:
-                hx, hazard = self.fm.query_ahead(x_pos, lookahead_bins=3)
-                if hx is not None and on_ground:
-                    dx_world = hx - x_pos
-                    # 前方一定距離以内なら事前ジャンプ
-                    if 0 <= dx_world <= float(hazard.get('dx_trigger', 56)):
-                        base_hold = max(self.min_jump_hold, hazard.get('min_hold', self.min_jump_hold))
-                        # 速度が高ければ少し増やす
-                        hold = int(base_hold + min(4, max(0.0, vx) * 2))
-                        self.jump_hold = max(self.jump_hold, min(self.max_jump_hold, hold))
-                        return _record_action_and_return(self._right_jump())
+                hx, hazard = self.fm.query_ahead(x_pos, lookahead_bins=5)
+                if hx is not None:
+                    hk = self.fm._key(hx)
+                    cd = self.hazard_cooldown.get(hk, 0)
+                    if cd > 0:
+                        self.hazard_cooldown[hk] = cd - 1
+                    else:
+                        dx_world = hx - x_pos
+                        trigger = float(hazard.get('dx_trigger', 72))
+                        jump_kind = hazard.get('jump', 'big')
+                        pre_rel = int(hazard.get('pre_release', self.pre_release_frames_default))
+                        if 0 <= dx_world <= trigger and on_ground and self.jump_hold == 0:
+                            big = (jump_kind == 'big')
+                            if self._queue_jump(big=big, pre_rel=pre_rel):
+                                self.hazard_cooldown[hk] = 60  # 1秒
+                                print(f"[LEARN] Planned {jump_kind} jump at x≈{hx:.1f} (curr={x_pos:.1f}, dx={dx_world:.1f})")
+                                return _record_action_and_return(self._right_jump())
+                        # 通過後は緩める
+                        if x_pos >= hx + self.fm.bin_size:
+                            self.fm.mark_passed(hx)
+                            self.hazard_cooldown[hk] = 0
             
             # 静的マップからの予防ジャンプ
             if self.sm is not None and on_ground:
-                if self.sm.query_ahead(x_pos, lookahead_bins=2):
-                    # 静的障害物用の標準ジャンプ
-                    hold = int(self.min_jump_hold + 4)  # 少し長めに
-                    self.jump_hold = max(self.jump_hold, hold)
+                if self.sm.query_ahead(x_pos, lookahead_bins=4):
+                    self._queue_jump(big=True)
+                    print(f"[LEARN] Static obstacle ahead of x={x_pos:.1f} -> big jump")
                     return _record_action_and_return(self._right_jump())
 
         # 詰まり検出
@@ -1040,21 +1136,31 @@ class FlowHeuristicPolicy:
         else:
             self.stuck_frames = 0
 
-        # 落下中なら滞空延長
+        # 落下中なら（A離し→）大ジャンプ保持で滞空延長（既にジャンプ中でなければ）
         if not on_ground and vy > self.fall_vy:
-            self.jump_hold = max(self.jump_hold, 4)
+            self._queue_jump(big=True)
             return _record_action_and_return(self._right_jump())
 
-        # 障害物や減速兆候でジャンプ開始
-        obstacle = self._obstacle_ahead(mario, objects, flow_estimates)
-        if on_ground and (obstacle or vx < self.vx_slow or self.stuck_frames > self.stuck_limit):
-            hold = int(self.min_jump_hold + (self.max_jump_hold - self.min_jump_hold) * max(0.0, min(1.0, vx / 2.5)))
-            self.jump_hold = max(self.jump_hold, hold)
+        gap = bool(flow_estimates.get("gap_ahead", False))
+        wall = bool(flow_estimates.get("static_wall_ahead", False))
+        moving_obs = self._moving_obstacle_ahead(mario, objects)
+
+        # 土管・壁・ギャップが視認されたら必ず BIG
+        if on_ground and (gap or wall):
+            self._queue_jump(big=True)
+            return _record_action_and_return(self._right_jump())
+
+        # それ以外の「障害物や減速兆候」のときは、動的なら SMALL、静的の疑いなら BIG、悩んだら BIG
+        if on_ground and (moving_obs or vx < self.vx_slow or self.stuck_frames > self.stuck_limit):
+            if moving_obs:
+                self._queue_jump(big=False)
+            else:
+                self._queue_jump(big=True)
             self.stuck_frames = 0
             return _record_action_and_return(self._right_jump())
 
         # 微調整
-        if on_ground and vx < 0.25 and not obstacle:
+        if on_ground and vx < 0.25 and not (gap or wall or moving_obs):
             return _record_action_and_return(self._left() if 'LEFT' in self.a else self._right())
 
         # 最終アクション決定
@@ -1274,7 +1380,7 @@ class GoExploreUIRunner:
         self.last_flow_estimates = {}
         
         # Learning systems
-        self.failure_memory = FailureMemory(bin_size=self.cell_size_x)
+        self.failure_memory = FailureMemory(bin_size=24, record_forward_px=20)
         self.static_map = StaticMapMemory(bin_size=32)
         self.flow_history = deque(maxlen=20)
         
