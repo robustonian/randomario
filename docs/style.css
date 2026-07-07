@@ -1,0 +1,227 @@
+/* ============================================================
+   RandoMario blog — dark theme
+   ============================================================ */
+:root {
+  --bg: #101218;
+  --bg-soft: #14171f;
+  --panel: #1a1e28;
+  --panel-light: #232838;
+  --border: #2e3648;
+  --text: #e2e8f0;
+  --text-dim: #97a1b4;
+  --accent: #fbbf24;
+  --green: #4ade80;
+  --red: #f87171;
+  --blue: #60a5fa;
+  --purple: #c4b5fd;
+  --code-bg: #0c0e13;
+  --maxw: 860px;
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Segoe UI', 'Hiragino Sans', 'Noto Sans JP', 'Yu Gothic UI', sans-serif;
+  font-size: 16.5px;
+  line-height: 1.85;
+}
+
+/* ---------- hero ---------- */
+.hero {
+  background:
+    radial-gradient(1000px 400px at 70% -10%, rgba(96, 165, 250, 0.14), transparent 60%),
+    radial-gradient(800px 380px at 20% -20%, rgba(251, 191, 36, 0.12), transparent 60%),
+    var(--bg-soft);
+  border-bottom: 1px solid var(--border);
+  padding: 72px 24px 56px;
+}
+.hero-inner { max-width: var(--maxw); margin: 0 auto; }
+.hero .kicker {
+  color: var(--accent);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  font-size: 13px;
+  text-transform: uppercase;
+  margin: 0 0 14px;
+}
+.hero h1 {
+  font-size: clamp(26px, 4.2vw, 40px);
+  line-height: 1.35;
+  margin: 0 0 18px;
+  letter-spacing: 0.01em;
+}
+.hero p.lede { color: var(--text-dim); font-size: 17px; max-width: 720px; margin: 0 0 22px; }
+.badges { display: flex; flex-wrap: wrap; gap: 10px; }
+.badge {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 999px;
+  padding: 5px 14px;
+  font-size: 13px;
+}
+.badge b { color: var(--green); font-weight: 700; }
+.badge.yellow b { color: var(--accent); }
+.badge.blue b { color: var(--blue); }
+
+/* ---------- layout ---------- */
+main { max-width: var(--maxw); margin: 0 auto; padding: 40px 24px 96px; }
+
+section { margin-top: 56px; }
+
+h2 {
+  font-size: 26px;
+  border-bottom: 2px solid var(--border);
+  padding-bottom: 10px;
+  margin: 0 0 22px;
+}
+h2 .no {
+  color: var(--accent);
+  font-family: 'Consolas', monospace;
+  margin-right: 10px;
+  font-size: 20px;
+}
+h3 { font-size: 19px; margin: 34px 0 12px; color: var(--blue); }
+p { margin: 0 0 16px; }
+a { color: var(--blue); text-decoration: none; }
+a:hover { text-decoration: underline; }
+strong { color: #fff; }
+em { color: var(--text-dim); font-style: normal; }
+
+ul, ol { padding-left: 26px; margin: 0 0 16px; }
+li { margin-bottom: 7px; }
+li::marker { color: var(--accent); }
+
+/* ---------- toc ---------- */
+.toc {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px 26px;
+  margin-top: 36px;
+}
+.toc h2 { border: none; font-size: 16px; margin: 0 0 10px; padding: 0; color: var(--text-dim); }
+.toc ol { margin: 0; columns: 2; column-gap: 40px; }
+.toc li { break-inside: avoid; margin-bottom: 5px; font-size: 15px; }
+
+/* ---------- figures ---------- */
+figure {
+  margin: 26px 0;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px;
+}
+figure img, figure object { width: 100%; height: auto; display: block; border-radius: 8px; }
+figcaption {
+  color: var(--text-dim);
+  font-size: 13.5px;
+  padding: 12px 6px 2px;
+  text-align: center;
+}
+
+/* ---------- code ---------- */
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 20px;
+  overflow-x: auto;
+  font-size: 14px;
+  line-height: 1.65;
+  margin: 0 0 18px;
+}
+code {
+  font-family: 'Consolas', 'DejaVu Sans Mono', monospace;
+  color: #d8e2f2;
+}
+p code, li code, td code {
+  background: var(--panel-light);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px 7px;
+  font-size: 0.86em;
+  color: var(--purple);
+}
+pre .c { color: #6b7689; }          /* comment */
+pre .k { color: var(--accent); }    /* keyword-ish */
+
+/* ---------- tables ---------- */
+.table-wrap { overflow-x: auto; margin: 0 0 18px; }
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 14.5px;
+  background: var(--panel);
+  border-radius: 10px;
+  overflow: hidden;
+}
+th, td { padding: 9px 14px; text-align: left; border-bottom: 1px solid var(--border); }
+th { background: var(--panel-light); color: var(--text-dim); font-weight: 600; }
+tr:last-child td { border-bottom: none; }
+td.num { font-family: 'Consolas', monospace; }
+td .pln { color: var(--green); font-weight: 700; }
+td .rnd { color: var(--accent); }
+
+/* ---------- callouts ---------- */
+.callout {
+  border-left: 4px solid var(--accent);
+  background: var(--panel);
+  border-radius: 0 10px 10px 0;
+  padding: 16px 20px;
+  margin: 0 0 18px;
+}
+.callout.green { border-left-color: var(--green); }
+.callout.red { border-left-color: var(--red); }
+.callout .title { font-weight: 700; margin-bottom: 6px; display: block; }
+.callout.red .title { color: var(--red); }
+.callout.green .title { color: var(--green); }
+.callout p:last-child { margin-bottom: 0; }
+
+/* pitfall cards */
+.pitfall {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px 24px;
+  margin-bottom: 18px;
+}
+.pitfall h4 { margin: 0 0 10px; font-size: 16.5px; color: var(--red); }
+.pitfall h4 .n {
+  display: inline-block; width: 26px; height: 26px; line-height: 26px;
+  text-align: center; border-radius: 50%;
+  background: rgba(248, 113, 113, 0.15); color: var(--red);
+  margin-right: 10px; font-size: 14px;
+}
+.pitfall p:last-child { margin-bottom: 0; }
+
+/* key list (keyboard) */
+kbd {
+  background: var(--panel-light);
+  border: 1px solid var(--border);
+  border-bottom-width: 3px;
+  border-radius: 6px;
+  padding: 1px 8px;
+  font-family: 'Consolas', monospace;
+  font-size: 0.85em;
+  color: var(--text);
+}
+
+/* ---------- footer ---------- */
+footer {
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+  text-align: center;
+  padding: 28px 24px 40px;
+  font-size: 13.5px;
+}
+
+@media (max-width: 640px) {
+  .toc ol { columns: 1; }
+  body { font-size: 15.5px; }
+}

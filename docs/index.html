@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>「考えるマリオ」を作る — セーブステートMPC × 画像認識 × 死から学ぶメモリ | RandoMario</title>
+<meta name="description" content="スーパーマリオブラザーズの全29ステージ(ループ面を除く)を、ステージ固有コードなしで攻略したモデルベースAIの仕組みを解説します。">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="hero-inner">
+    <p class="kicker">RandoMario Tech Blog</p>
+    <h1>「考えるマリオ」を作る<br>— セーブステートMPC × 画像認識 × 死から学ぶメモリで全ステージ攻略 —</h1>
+    <p class="lede">
+      ランダム入力の Go-Explore では 1 ステージあたり 38〜928 エピソードかかっていたスーパーマリオブラザーズの攻略を、
+      モデルベースのプランナーに置き換え、ループ構造のない全 29 ステージをほぼ 1〜9 エピソードでクリア・検証完了するまでの技術解説です。
+    </p>
+    <div class="badges">
+      <span class="badge">クリア <b>29 / 29</b> ステージ</span>
+      <span class="badge">初見一発クリア <b>16</b> ステージ</span>
+      <span class="badge yellow">ステージ固有コード <b>0 行</b></span>
+      <span class="badge blue">エミュレーション <b>~950fps</b>/コア</span>
+    </div>
+  </div>
+</header>
+
+<main>
+
+<nav class="toc">
+  <h2>目次</h2>
+  <ol>
+    <li><a href="#arch">全体アーキテクチャ</a></li>
+    <li><a href="#mpc">セーブステート・ロールアウトMPC</a></li>
+    <li><a href="#vision">画像からの状態推定</a></li>
+    <li><a href="#memory">死から学ぶメモリ</a></li>
+    <li><a href="#pitfalls">ハマりどころと解決策</a></li>
+    <li><a href="#terrain">特殊地形への対応</a></li>
+    <li><a href="#speed">高速化と可変速度</a></li>
+    <li><a href="#results">結果</a></li>
+    <li><a href="#loop">未解決: ループ城 7-4</a></li>
+    <li><a href="#usage">使い方</a></li>
+  </ol>
+</nav>
+
+<figure>
+  <img src="assets/dashboard.png" alt="Random vs Planner 比較ダッシュボード">
+  <figcaption>比較ダッシュボード。各ステージの RND(ランダム)/ PLN(プランナー)の初クリアエピソードを並べて表示。</figcaption>
+</figure>
+
+<!-- ================================================================ -->
+<section id="arch">
+<h2><span class="no">01</span>全体アーキテクチャ</h2>
+
+<figure>
+  <img src="assets/architecture.svg" alt="全体アーキテクチャ図">
+  <figcaption>役割ごとに分割したモジュール構成。旧 main.py(約1100行のモノリス)は廃止。</figcaption>
+</figure>
+
+<pre><code>mario/
+├── env_utils.py      <span class="c"># エミュレータ直結・セーブステート・高速ロールアウト</span>
+├── actions.py        <span class="c"># アクションセット定義</span>
+├── vision.py         <span class="c"># 画像からの状態推定</span>
+├── planner.py        <span class="c"># 候補生成 + ロールアウト評価 (MPC)</span>
+├── memory.py         <span class="c"># 死亡分析メモリ + 結果DB (SQLite)</span>
+├── agent_planner.py  <span class="c"># 攻略AIのエピソードループ</span>
+├── agent_explore.py  <span class="c"># 従来の Go-Explore (ランダム) — 比較用</span>
+└── ui.py             <span class="c"># 共通 Pygame UI</span>
+play.py               <span class="c"># 統合エントリポイント</span>
+verify.py             <span class="c"># 全ステージ並列検証</span>
+progress_viewer.py    <span class="c"># 比較ダッシュボード</span></code></pre>
+
+<div class="callout green">
+  <span class="title">設計原則はひとつだけ</span>
+  <p><strong>ステージ固有のロジックは一切書かない。</strong>ステージごとの知識は、実プレイの死亡から学習した「ハザードメモリ」としてのみ蓄積される。
+  だからプランナーは初見のステージでも同じコードで動く。1-1 も、水中の 2-2 も、ファイアバーの城 1-4 も、大穴だらけの 8-1 も、すべて同一アルゴリズムで攻略している。</p>
+</div>
+</section>
+
+<!-- ================================================================ -->
+<section id="mpc">
+<h2><span class="no">02</span>心臓部: セーブステート・ロールアウトによるモデル予測制御</h2>
+
+<h3>「予測モデル」を学習しない、という選択</h3>
+<p>「過去数フレームから位置・速度・加速度を推定して、次の数十ステップを計画する」を実現する方法は 2 つあります。</p>
+<ol>
+  <li>物理モデル(またはニューラルネット)で未来を<strong>予測</strong>して計画する</li>
+  <li>エミュレータ自体を世界モデルとして使い、<strong>実際に未来を再生</strong>して計画する</li>
+</ol>
+<p>
+  本プロジェクトは <strong>2 のハイブリッド</strong>を採用しました。nes-py エミュレータには <code>Backup</code>/<code>Restore</code> という
+  セーブステート機構が C++ 側に存在し、しかも<strong>1秒あたり12万回</strong>という事実上ゼロコストで呼べることを実測で確認したからです。
+  決定論的な NES において、これは「完璧な世界モデル」が手に入ることを意味します。
+</p>
+<p>
+  一方で「どんな候補を試すべきか」の生成には、後述する<strong>画像ベースの状態推定</strong>を使います。
+  推定は候補を賢く絞るために、正確なロールアウトは最終判断のために、と役割を分けたハイブリッド構成です。
+</p>
+
+<h3>リプランのサイクル</h3>
+<figure>
+  <img src="assets/planning_loop.svg" alt="プランニングループ図">
+  <figcaption>数十フレームごとに回すリプランのサイクル。</figcaption>
+</figure>
+
+<ol>
+  <li><strong>snapshot</strong> — 現在のエミュレータ状態を保存</li>
+  <li><strong>候補プラン生成</strong> — 今後 70〜260 フレームぶんの入力列を 10〜50 本生成
+    <ul>
+      <li>基本形: ダッシュ継続 / ジャンプ長掃引(6〜32F)/ 遅延ジャンプ / 歩き / 待機 / 後退</li>
+      <li>ビジョン由来: 「穴の縁で踏み切るジャンプ」「敵との会合点で踏むジャンプ」</li>
+      <li>状況特化: 水泳ストローク、リフト乗り継ぎ、エッジジャンプポリシー</li>
+    </ul>
+  </li>
+  <li><strong>ロールアウト評価</strong> — 各候補をエミュレータで実際に再生し、
+    <code>前進距離 + 0.5×最終位置 + 旗ボーナス − 死亡ペナルティ − ワープペナルティ</code> で採点。死んだ時点で打ち切り、毎回 restore で巻き戻す</li>
+  <li><strong>テール検証</strong> — 上位候補だけ、プラン終了後さらに 90 フレーム(ダッシュ継続を仮定)再生。
+    「プランのすぐ先に隠れた死」(穴への着地、沈む足場)を検知して減点</li>
+  <li><strong>実行</strong> — 最良プランを実機で実行。<strong>生存が検証済みのフレーム数から安全マージン 16F を引いた長さ</strong>だけ進めて、次のリプランへ</li>
+</ol>
+<p>
+  全候補が死ぬ場合は wave2(ジャンプタイミングの精密掃引、空中で止まって足場に乗る <code>jumpstop</code>)、
+  wave3(最長 170F の待機・大きく後退して助走・ランダム複合)へ自動的にエスカレーションします。
+</p>
+
+<h3>スコアリングの小さな工夫</h3>
+<ul>
+  <li><strong>死亡は「遅いほどマシ」</strong>: ペナルティを生存フレーム数で緩和。全滅時でも「一番粘れる」プランを選ぶ</li>
+  <li><strong>ワープゾーン封印</strong>: ロールアウト中にワールド番号が変わったら大幅減点。1-2 の天井ルートからワープゾーンに入って「別ステージのゴールでクリア扱い」になる事故を防ぐ</li>
+  <li><strong>x が詰まったら高さを評価</strong>: 前進できない状況では、足場の上での高度上昇(<code>+0.4 × Δy</code>)を加点。これが 4-2 の上昇リフト(乗って待たないと進めない)を解いた</li>
+</ul>
+</section>
+
+<!-- ================================================================ -->
+<section id="vision">
+<h2><span class="no">03</span>画像からの状態推定(ビジョン)</h2>
+<p>
+  RAM を読めばマリオや敵の位置は正確に取れますが、要件は「<strong>過去数フレームの画像から</strong>位置・速度・加速度を推定する」こと。
+  <code>vision.py</code> は生のフレーム(256×240 RGB)だけから以下を推定します。
+</p>
+
+<figure>
+  <img src="assets/ui_planner.png" alt="実行中のプランナーUI">
+  <figcaption>実行中のUI。ゲーム画面上に検出結果をオーバーレイ(緑=マリオ、赤=敵+速度ラベル、黄=穴マーカー)。右側にコントローラ入力とプランナー状態。</figcaption>
+</figure>
+
+<h3>スクロール補償フレーム差分</h3>
+<p>横スクロールゲームでは、画面全体が動くため単純なフレーム差分は使えません。そこで:</p>
+<ol>
+  <li>背景が支配的な帯(y=140〜200)を 0〜8px 水平シフトさせて SAD(絶対差の総和)が最小になるシフト量を求める → <strong>カメラのスクロール量</strong></li>
+  <li>前フレームをそのぶんずらしてから差分を取る → <strong>動いているものだけ</strong>が残る</li>
+  <li>連結成分抽出(OpenCV)でブロブ化し、最近傍マッチングで追跡</li>
+</ol>
+<p>
+  各トラックは EMA 平滑化した<strong>速度・加速度</strong>を持ちます。マリオの識別には
+  「info の x 変位 − スクロール量 = 画面上の移動量」という運動学的な一致を使い、識別できたらカメラ座標→ワールド座標の較正を更新します。
+</p>
+
+<h3>穴と足場エッジの検出</h3>
+<ul>
+  <li><strong>穴(ピット)</strong>: 空の帯(y=40〜96)の最頻色を背景色とみなし、地面の帯(y=208〜236)が背景色で貫通している列の連なりを穴と判定。地上・地下・城のどのテーマでも動く</li>
+  <li><strong>足場エッジ</strong>: マリオの<strong>足元の高さ</strong>で右方向に走査し、背景色が始まる位置を「今乗っている足場の右端」とする。木の上や城の足場など、画面最下段の走査では意味がない場面で効く</li>
+</ul>
+<p>
+  これらは <code>hints</code> としてプランナーに渡り、「<strong>穴の縁ちょうどで踏み切る</strong>」「<strong>敵と会合するタイミングで踏む</strong>」という狙い撃ち候補の生成に使われます。
+</p>
+</section>
+
+<!-- ================================================================ -->
+<section id="memory">
+<h2><span class="no">04</span>死から学ぶ — ハザードメモリと責任割当て</h2>
+<p>ロールアウトがあっても死は起きます(ホライズンの外に危険が隠れている場合)。そこで死亡をステージ知識に変換します。</p>
+
+<h3>死因の分類</h3>
+<div class="table-wrap">
+<table>
+  <tr><th>死因</th><th>判定方法</th></tr>
+  <tr><td><code>pit</code>(落下)</td><td>y ビューポートが画面外下</td></tr>
+  <tr><td><code>enemy</code>(敵)</td><td>ビジョンが死亡地点付近に敵トラックを検出</td></tr>
+  <tr><td><code>contact</code></td><td>それ以外の接触死(ファイアバー等)</td></tr>
+  <tr><td><code>timeout</code></td><td>ゲーム内タイマー切れ</td></tr>
+  <tr><td><code>stuck</code></td><td>進行不能でエピソード放棄</td></tr>
+  <tr><td><code>loop</code></td><td>迷路チェックで巻き戻された(死ではないが記録)</td></tr>
+</table>
+</div>
+
+<h3>ハザードメモリの効果</h3>
+<p>死亡地点は SQLite の <code>hazards</code> テーブルに <code>(ステージ, x座標, 死因, 回数)</code> で蓄積され、次のエピソードからは:</p>
+<ul>
+  <li>その地点の <strong>280px 手前から先読みホライズンを 70F → 120F に拡張</strong></li>
+  <li>同じ場所で 2 回死んだら、最初から<strong>精密探索 wave2 で計画</strong></li>
+</ul>
+
+<h3>責任割当て(blame assignment)</h3>
+<div class="callout">
+  <span class="title">一番効いた仕組み</span>
+  <p>
+    単に「死んだ瞬間のプラン」を出禁にしても学習しません。<strong>致命的な選択はもっと前</strong>にあるからです
+    (袋小路へのジャンプ → 着地後は何をしても死ぬ → 死亡時に実行していたのは末端の悪あがきプラン)。
+  </p>
+  <p>
+    そこで死亡時には「<strong>死の直前 160 フレーム以内に開始されたすべてのプラン</strong>」を
+    ブラックリスト <code>(ステージ, プラン開始x, 入力列ハッシュ)</code> に登録します。
+    次のエピソードで同じ場所に来るとそのプランは候補から除外され、<strong>エピソードごとに必ず違う選択</strong>が試されます。
+    5-3 では「同じ穴で3回死ぬ → 4回目に突破」という学習カーブがログにはっきり現れました。
+  </p>
+</div>
+</section>
+
+<!-- ================================================================ -->
+<section id="pitfalls">
+<h2><span class="no">05</span>ハマりどころと解決策(失敗談)</h2>
+<p>この種のシステムは、理屈どおりに動かない箇所にこそ本質があります。代表的な 4 つを紹介します。</p>
+
+<div class="pitfall">
+  <h4><span class="n">1</span>リセットすると必ず 1-1 が始まる</h4>
+  <p>
+    環境はリセット時にタイトル画面をスキップしながらステージ番号を RAM に書き込みます。ところが<strong>コンソールリセットでは NES の RAM が保持される</strong>ため、
+    前エピソードのタイマー値が残って「もうゲームは始まっている」と誤判定され、ステージ書き込みがスキップされ、<strong>どのステージを指定しても 1-1 がロード</strong>されていました。
+    しかも実ステージとターゲットの不一致で「ワープした」と判定され、プランナーが完全に無効化。
+    対策はリセット直後にタイマー RAM(<code>$07F8-$07FA</code>)をゼロクリアするだけ。
+    「4 つの異なるステージが全く同じフレーム数で死ぬ」という不気味なログから発覚しました。
+  </p>
+</div>
+
+<div class="pitfall">
+  <h4><span class="n">2</span>受動ホライズンの「先送りループ」</h4>
+  <p>
+    「47フレーム走ってからジャンプ」というプランを選びつつ、実行は安全のため先頭 12 フレームだけ → リプランするとまた「47フレーム先でジャンプ」が選ばれ……
+    <strong>永遠にジャンプに到達しない</strong>現象。ロールアウトは正確なので
+    「生存が検証済みの区間は堂々と実行してよい」という原則に切り替えて解決(検証済みフレーム数 − 16F を実行)。
+  </p>
+</div>
+
+<div class="pitfall">
+  <h4><span class="n">3</span>テール検証が「待機」を優遇するバグ</h4>
+  <p>
+    プラン後の追加再生で死んだ候補を減点する際、当初「総生存フレーム数」でスケールしたため、
+    <strong>ただ長く待つプランほど減点が軽くなる</strong>逆インセンティブが発生。
+    「プラン終了後に何フレーム生き延びたか」でスケールするよう修正しました。
+  </p>
+</div>
+
+<div class="pitfall">
+  <h4><span class="n">4</span>責任ウィンドウの毒(過剰ブラックリスト)</h4>
+  <p>
+    責任割当てを「死亡地点の手前 320px のプラン全部」にしたところ、<strong>手前の穴を正しく越えたジャンプまで出禁</strong>になり、
+    エピソードを重ねるほど下手になる退行が発生(5-3 で最高到達 965 → 658)。
+    ウィンドウを座標ではなく<strong>時間(直前160フレーム)</strong>に変えて解決。
+  </p>
+</div>
+
+<div class="callout red">
+  <span class="title">最重要の観測量</span>
+  <p><strong>「同一条件で同じ死に方を繰り返すログ」</strong>は、学習が壊れているサイン。max_x とフレーム数が複数エピソードで完全一致したら、どこかの学習経路が死んでいる。</p>
+</div>
+</section>
+
+<!-- ================================================================ -->
+<section id="terrain">
+<h2><span class="no">06</span>特殊地形への対応</h2>
+
+<h3>水中(2-2, 7-2)</h3>
+<p>
+  RAM の swim フラグ(<code>$0704</code>)で水中を検知すると、候補セットが
+  <strong>ストローク(A を 2F 押して離す)を周期 6〜24F で繰り返す</strong>水泳プランに切り替わります。
+  上昇・立ち泳ぎ・沈下・後退の候補も持ち、どの周期が正解かはロールアウトが決めます。両ステージともエピソード 1 でクリアでした。
+</p>
+
+<h3>広い穴 — エッジジャンプポリシー(クローズドループ候補)</h3>
+<p>
+  8-1 の大穴は「全力の助走+崖っぷちで踏み切り」が必須で、固定フレーム数の候補では踏切位置が合いません。
+  そこで<strong>ロールアウト中の x 座標に反応するポリシー型候補</strong>を導入しました:
+</p>
+<div class="callout">
+  <p>「(必要なら back px 後退 →)ダッシュ → <strong>x がエッジ − margin に達した瞬間に</strong>ジャンプ hold F」</p>
+</div>
+<p>
+  ロールアウト中に出力した入力列は記録され、採用時は<strong>その記録をそのまま実機で再生</strong>します(決定論なので完全に一致)。
+  エッジ位置はビジョンの足場エッジ検出・穴検出から取ります。8-1 はこの仕組み+ハザード学習で 8 エピソードでクリアしました。
+</p>
+
+<h3>リフト・ゴンドラ(3-3, 5-3, 4-2)</h3>
+<ul>
+  <li>wave3 に「<strong>ホップ → 乗って待つ(40/80F)→ ホップ</strong>」というリフト乗り継ぎ複合候補</li>
+  <li>x が進まないときの<strong>高度ボーナス</strong>(上昇リフトに乗ることが正当に評価される)</li>
+  <li>上下移動をスタック判定から除外(リフトで上昇中に「進行不能」と誤判定して打ち切っていた)</li>
+</ul>
+<figure>
+  <img src="assets/stage_4-2_elevator.png" alt="4-2 リフト地帯" style="max-width:420px;margin:0 auto;">
+  <figcaption>4-2 の攻略中に自動採取したフレーム。ここの上昇リフトが「x 前進だけを報酬にする」設計の盲点だった。</figcaption>
+</figure>
+
+<h3>最後の砦 — ランダム複合候補</h3>
+<p>
+  決定論的な候補セットには構造的な死角があります(トランポリンのバウンド、変則的な壁登り)。
+  wave2/3 には<strong>ランダムに合成した入力列</strong>(右荷重の重み付きサンプリング、4〜26F セグメント)を混ぜます。
+  ランダムといっても採用前に必ずロールアウトで検証されるので、<strong>Go-Explore の多様性を MPC の安全性で包んだ</strong>形です。
+  2-1・6-2 などの膠着はこれが破りました。
+</p>
+</section>
+
+<!-- ================================================================ -->
+<section id="speed">
+<h2><span class="no">07</span>高速化と実行中の可変速度</h2>
+<ul>
+  <li>エミュレーション実測 <strong>約 950fps/コア</strong>。ロールアウトは gym のラッパーを全てバイパスし、<code>_frame_advance()</code> + RAM 直読み</li>
+  <li><strong>平原の早期採択</strong>: 危険が何もなく全速前進できる候補が見つかったら、残り候補の評価を打ち切り(候補 1 本・0.07 秒でリプラン完了)</li>
+  <li><strong>速度はいつでも変更可能</strong>: <kbd>1</kbd>〜<kbd>5</kbd> キーで 1x/2x/4x/8x/MAX。
+    速度が変えるのは<strong>描画頻度とウェイトだけ</strong>で、エミュレーションは常に 1 フレームずつ正確に実行(精度に影響ゼロ)。MAX では描画を壁時計 30fps に間引き</li>
+  <li>検証は <code>verify.py</code> がステージごとにプロセスを立てて並列実行(SQLite は WAL モードで共有)</li>
+</ul>
+</section>
+
+<!-- ================================================================ -->
+<section id="results">
+<h2><span class="no">08</span>結果</h2>
+
+<figure>
+  <img src="assets/first_clear_comparison.png" alt="初クリアエピソード数の比較(対数目盛)">
+  <figcaption>初クリアまでのエピソード数(対数目盛)。黄=ランダム(Go-Explore)、緑=プランナー。</figcaption>
+</figure>
+
+<p>
+  ループ構造のない<strong>全 29 ステージをクリア</strong>(4-4 / 7-4 / 8-4 はループ迷路のため対象外)。
+  29 ステージ中 <strong>16 ステージがエピソード 1</strong>(=初見一発)クリアです。
+</p>
+
+<div class="table-wrap">
+<table>
+  <tr><th>ステージ</th><th>Random</th><th>Planner</th><th>ステージ</th><th>Random</th><th>Planner</th></tr>
+  <tr><td>1-1</td><td class="num"><span class="rnd">EP85</span></td><td class="num"><span class="pln">EP1</span></td><td>5-1</td><td class="num"><span class="rnd">EP122</span></td><td class="num"><span class="pln">EP3</span></td></tr>
+  <tr><td>1-2</td><td class="num"><span class="rnd">EP171</span></td><td class="num"><span class="pln">EP1</span></td><td>5-2</td><td class="num"><span class="rnd">EP306</span></td><td class="num"><span class="pln">EP3</span></td></tr>
+  <tr><td>1-3</td><td class="num"><span class="rnd">EP266</span></td><td class="num"><span class="pln">EP5</span></td><td>5-3</td><td class="num"><span class="rnd">EP704</span></td><td class="num"><span class="pln">EP15</span></td></tr>
+  <tr><td>1-4</td><td class="num"><span class="rnd">EP43</span></td><td class="num"><span class="pln">EP1</span></td><td>5-4</td><td class="num"><span class="rnd">EP164</span></td><td class="num"><span class="pln">EP6</span></td></tr>
+  <tr><td>2-1</td><td class="num"><span class="rnd">EP367</span></td><td class="num"><span class="pln">EP1</span></td><td>6-1</td><td class="num"><span class="rnd">EP133</span></td><td class="num"><span class="pln">EP1</span></td></tr>
+  <tr><td>2-2</td><td class="num"><span class="rnd">EP42</span></td><td class="num"><span class="pln">EP1</span></td><td>6-2</td><td class="num"><span class="rnd">EP505</span></td><td class="num"><span class="pln">EP1</span></td></tr>
+  <tr><td>2-3</td><td class="num"><span class="rnd">EP186</span></td><td class="num"><span class="pln">EP2</span></td><td>6-3</td><td class="num"><span class="rnd">EP632</span></td><td class="num"><span class="pln">EP7</span></td></tr>
+  <tr><td>2-4</td><td class="num"><span class="rnd">EP121</span></td><td class="num"><span class="pln">EP8</span></td><td>6-4</td><td class="num"><span class="rnd">EP226</span></td><td class="num"><span class="pln">EP3</span></td></tr>
+  <tr><td>3-1</td><td class="num"><span class="rnd">EP214</span></td><td class="num"><span class="pln">EP1</span></td><td>7-1</td><td class="num"><span class="rnd">EP38</span></td><td class="num"><span class="pln">EP1</span></td></tr>
+  <tr><td>3-2</td><td class="num"><span class="rnd">EP80</span></td><td class="num"><span class="pln">EP1</span></td><td>7-2</td><td class="num"><span class="rnd">EP99</span></td><td class="num"><span class="pln">EP1</span></td></tr>
+  <tr><td>3-3</td><td class="num"><span class="rnd">EP335</span></td><td class="num"><span class="pln">EP2</span></td><td>7-3</td><td class="num"><span class="rnd">EP225</span></td><td class="num"><span class="pln">EP9</span></td></tr>
+  <tr><td>3-4</td><td class="num"><span class="rnd">EP874</span></td><td class="num"><span class="pln">EP2</span></td><td>8-1</td><td class="num"><span class="rnd">EP775</span></td><td class="num"><span class="pln">EP8</span></td></tr>
+  <tr><td>4-1</td><td class="num"><span class="rnd">EP39</span></td><td class="num"><span class="pln">EP1</span></td><td>8-2</td><td class="num"><span class="rnd">EP429</span></td><td class="num"><span class="pln">EP4</span></td></tr>
+  <tr><td>4-2</td><td class="num"><span class="rnd">EP153</span></td><td class="num"><span class="pln">EP1</span></td><td>8-3</td><td class="num"><span class="rnd">EP461</span></td><td class="num"><span class="pln">EP1</span></td></tr>
+  <tr><td>4-3</td><td class="num"><span class="rnd">EP179</span></td><td class="num"><span class="pln">EP9</span></td><td></td><td></td><td></td></tr>
+</table>
+</div>
+
+<p>
+  ちなみに 6-4 は当初「ループステージ」として除外予定でしたが、実際の SMB のループ迷路は <strong>4-4 / 7-4 / 8-4</strong> で、6-4 は普通の城です。
+  実際に走らせたら 3 エピソードでクリアしました。
+</p>
+</section>
+
+<!-- ================================================================ -->
+<section id="loop">
+<h2><span class="no">09</span>未解決: ループ城 7-4</h2>
+<p>7-4 は「正しい高さ(レーン)で連続チェックポイントを通過しないと巻き戻される」迷路城です。以下の汎用機構まで実装しました:</p>
+<ul>
+  <li>ループ(大きな x 巻き戻し)の検出とハザード記録</li>
+  <li>ループ帯では先読みホライズンを 260F に拡張し、<strong>巻き戻され自体をロールアウト内で観測</strong>して回避</li>
+  <li>巻き戻された際の <strong>y レーンプロファイル</strong>(x 32px 刻みの高さ列)を記録し、失敗済みレーンと一致する候補を減点 → エピソード内でレーンを系統的に列挙</li>
+</ul>
+<p>
+  それでも 100 以上のレーンを試して未突破です。原因は「3 連チェックの<strong>正解レーン列</strong>への信用割当て」がまだ粗いこと。
+  チェック単位でレーンを木探索する機構が次の一手だと考えています。
+</p>
+</section>
+
+<!-- ================================================================ -->
+<section id="usage">
+<h2><span class="no">10</span>使い方</h2>
+
+<pre><code><span class="c"># 攻略AIをUI付きで観る(1〜5キーで速度変更、Vでビジョン表示)</span>
+uv run play.py --agent planner --stage 1-1
+
+<span class="c"># ヘッドレス最速</span>
+uv run play.py --agent planner --stage 8-1 --headless
+
+<span class="c"># ランダム(従来のGo-Explore)</span>
+uv run play.py --agent explore --stage 1-1
+
+<span class="c"># 全ステージ並列検証</span>
+uv run verify.py
+
+<span class="c"># 比較ダッシュボード(標準ライブラリのみで動作)</span>
+python3 progress_viewer.py</code></pre>
+
+<h3>まとめ</h3>
+<ul>
+  <li><strong>エミュレータのセーブステートは最強の世界モデル。</strong>予測を学習する代わりに、未来を実際に再生して評価する</li>
+  <li>探索空間は膨大なので、<strong>画像ベースの状態推定で候補を賢く絞る</strong>ことと、<strong>死亡からの学習(ハザード+責任割当て)</strong>が不可欠</li>
+  <li>受動ホライズン制御には「先送りループ」「テールの死角」「ブラックリストの毒」など理屈では気づきにくい罠が多い。<strong>同一条件で同じ死に方を繰り返すログ</strong>が最重要の観測量だった</li>
+</ul>
+<p>ステージ固有のコードを 1 行も書かずに 29 ステージ + 1(6-4)を攻略できたのは、この 3 点の組み合わせによるものです。</p>
+</section>
+
+</main>
+
+<footer>
+  RandoMario — Super Mario Bros. automation project ·
+  Markdown 版は <a href="blog.md">docs/blog.md</a>
+</footer>
+
+</body>
+</html>
