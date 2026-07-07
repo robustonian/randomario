@@ -1,5 +1,6 @@
-# Bandit learning statistics (auto-generated)
-bandit_*.json
+# Planner learning/results DB and verification logs (auto-generated)
+db/
+logs/
 
 # Python-generated files
 __pycache__/

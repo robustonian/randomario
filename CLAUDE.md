@@ -4,300 +4,93 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-RandoMario is a Super Mario Bros. automation project built in Python that uses OpenAI Gym's `gym-super-mario-bros` environment. The project features an advanced bandit learning AI agent with statistical optimization, exponential decay, persistent storage, and Top-K replay diversity that plays Mario automatically while displaying both the game screen and a visual representation of the Nintendo Famicom controller inputs in real-time using Pygame.
+RandoMario is a Super Mario Bros. automation project built on `gym-super-mario-bros` (nes-py emulator). It contains two agents whose data stores are deliberately separate so they can be compared:
 
-## Core Architecture
+1. **Planner agent** (`mario/agent_planner.py`) — model-based: estimates world state from recent frames (vision), generates candidate input plans for the next few dozen frames, evaluates them with savestate-based lookahead rollouts on the emulator, and executes the best. Deaths are analyzed (pit / enemy / contact / timeout / loop / stuck) and stored per stage in a hazard memory so the same failure is not repeated. **No stage-specific hardcoding** — the same logic clears unseen stages. Results/learning live in `db/planner.sqlite`.
+2. **Go-Explore agent** (`mario/agent_explore.py`) — the random baseline (formerly `test.py`): cell-archive based return-then-explore. Archives live in `pkl/go_explore_archive_{stage}_{actions}.pkl`.
 
-### Core Files
-- **Main Entry Point**: `main.py` - Contains the entire bandit learning application logic (~1000+ lines)
-- **Test Implementation**: `test.py` - Alternative Go-Explore style Mario agent with UI integration (~600+ lines)
-- **Progress Dashboard**: `progress_viewer.py` - GUI dashboard for monitoring stage completion status (~350+ lines)
-- The main codebase follows a monolithic structure with all functionality in single files
+Loop stages **4-4, 7-4, 8-4** are excluded from planner verification scope (SMB's wrap-around maze checkpoints; 6-4 is a normal castle and clears fine). 7-4 is still attempted best-effort via loop detection + lane-profile learning.
 
-### Key Components in main.py:
-- **Command Line Interface**: Stage selection via `--stage` or `-s` arguments (e.g., 1-1, 2-1, 4-1, 8-4)
-- **Action Set Management**: Multiple predefined action configurations (RIGHT_ONLY, SIMPLE_MOVEMENT, COMPLEX_MOVEMENT, etc.) with position-based switching logic
-- **Pygame UI System**: Dual-screen display showing game window and controller visualization
-- **Bandit Learning Agent**: Statistically optimized action selection using UCB1 + ε-greedy algorithms with X-coordinate binning
-- **Replay System**: Partial replay with X-coordinate based cutoff and adaptive exploration
-- **Stall Detection**: Automatic boost mode activation when progress stagnates
-- **Controller Visualization**: Real-time highlighting of pressed buttons on a Famicom controller image
-- **Auto Image Download**: Automatically downloads controller image from external source if missing
+## Architecture
 
-### Core Function Architecture (main.py):
-**Learning Functions:**
-- `choose_action_with_bandit(bin_id, candidate_indices)`: UCB1 action selection with exploration
-- `update_bandit_from_transition(prev_decision, curr_x, done, info, prev_x, is_stalled)`: Reward calculation with penalties
-- `get_x_bin(x)`: Maps X-coordinates to learning bins
-- `calculate_sequence_diversity(seq1, seq2)`: Edit distance for replay diversity
+```
+mario/
+├── env_utils.py      # MarioSession: direct SuperMarioBrosEnv construction (no gym.make
+│                     # wrapper overhead), hard reset independent of the nes-py backup slot,
+│                     # snapshot()/restore() savestates, rollout_step() fast frame advance
+├── actions.py        # Action sets incl. PLANNER_MOVEMENT superset; get_action_indices()
+├── vision.py         # VisionTracker: scroll-compensated frame differencing, blob tracking
+│                     # (position/velocity/acceleration), Mario identification, gap detection
+├── planner.py        # Planner: candidate waves (1=fast, 2=fine sweep, 3=long waits/retreat),
+│                     # swim candidates in water, vision-seeded gap/stomp candidates,
+│                     # rollout scoring (progress + flag bonus - death/warp penalty)
+├── memory.py         # PlannerMemory: SQLite (WAL) hazards, plan blacklist, episodes, clears
+├── agent_planner.py  # PlannerAgent: episode loop, stall/loop/warp detection, death analysis
+├── agent_explore.py  # GoExploreAgent + Cell + CellUnpickler (loads legacy __main__.Cell pickles)
+└── ui.py             # GameUI: shared pygame UI, runtime speed control (1x..8x/MAX),
+                      # vision overlay, controller visualization
+play.py               # unified CLI entry point (--agent planner|explore)
+verify.py             # parallel headless verification across stages (multiprocessing)
+progress_viewer.py    # comparison dashboard (tkinter, stdlib-only: run with system python3)
+```
 
-**Persistence Functions:**
-- `save_stats(stage)` / `load_stats(stage)`: JSON-based cross-session learning
-- `convert_numpy_types(obj)`: Handles numpy serialization for JSON compatibility
+### Key technical points
 
-**Game Loop Functions:**
-- `game_loop(env, stage)`: Main execution loop with episode management
-- `update_memory_at_episode_end()`: Top-K sequence management with diversity filtering
-- `setup_stage_strategy(stage)`: Dynamic action set configuration per stage
-
-**UI Functions:**
-- `draw_controller_state_ui()`: Real-time controller button visualization
-- `draw_text_info()`: HUD overlay with learning statistics
-
-### Action System Architecture
-The codebase uses a sophisticated action switching system with statistical learning:
-
-**Stage Strategy System:**
-- `STAGE_STRATEGIES`: Dictionary containing stage-specific strategy configurations
-- `X_THRESHOLDS_FOR_ACTION_SET_SWITCH`: Defines X-coordinate thresholds for action set changes
-- `ALLOWED_ACTIONS_SUBSETS_BY_X`: Maps position ranges to specific action sets
-- `ACTION_SET_NAMES_BY_X`: Human-readable names for each action set
-
-**Bandit Learning System:**
-- `X_BIN_SIZE`: Divides X-coordinates into bins for localized learning (default: 20px, range: 10-40)
-- `bandit_stats`: Tracks success/failure statistics for each action in each X-bin
-- `UCB_C`: Upper Confidence Bound exploration parameter (default: 1.2, range: 0.8-2.0)
-- `EPSILON_GREEDY`: Random exploration probability (default: 0.10, range: 0.05-0.20)
-
-**Adaptive Exploration:**
-- `REPLAY_BACKOFF_X`: Early replay cutoff distance from best X (default: 120px, range: 80-160)
-- `STALL_TIME_SEC`: Stagnation detection threshold (default: 2.0s, range: 1.5-3.0)
-- `DEATH_PENALTY`: Penalty for death/falling actions (default: 20.0, range: 20-40)
-- `BOOST_DECISIONS`: Aggressive action count during stall recovery (default: 8)
-
-**Supported Stage Strategies:**
-- **4-4**: 6-stage strategy with specialized actions for maze navigation
-- **6-2**: 3-stage strategy with simple movement transitions
-- **7-4**: 10-stage complex strategy with precise dash/jump combinations
-- **default**: Basic RIGHT_ONLY strategy for all other stages
-
-The system automatically selects the appropriate strategy based on the specified stage and optimizes action selection through statistical learning.
-
-### Key Components in test.py:
-- **Go-Explore Algorithm**: Cell-based archive system for systematic exploration
-- **Cell Archive**: Discretizes game states into (x_bin, y_bin, status) cells with path storage
-- **Return-then-Explore**: Two-phase approach - return to promising cells, then explore from there
-- **Heuristic Action Sampling**: Probabilistic action selection with jump/dash/movement patterns
-- **Archive Persistence**: Saves/loads exploration progress using pickle format
-- **Real-time UI**: Same controller visualization system as main.py
-
-**Archive System:**
-- `Cell`: Dataclass storing cell_id, path sequence, max_x reached, visit count
-- `_select_start_cell_path()`: Weighted selection of promising cells based on max_x and visit frequency
-- `_maybe_add_or_update_cell()`: Updates archive with better paths or higher x-progress
-
-**Exploration Heuristics:**
-- `down_press_prob`: 2% chance to press down (for pipes/secret areas)
-- `left_adjust_prob`: 5% chance for left movement (position adjustment)
-- `jump_start_prob`: 12% chance to start jump sequence (6-14 frame holds)
-- Main action: right dash for forward progress
-
-### Key Components in progress_viewer.py:
-- **Real-time Monitoring**: Automatic file watching with 2-second intervals to detect pkl changes
-- **GUI Dashboard**: Tkinter-based 4×8 matrix showing all stages (1-1 through 8-4)
-- **Status Visualization**: Color-coded progress indicators with episode tracking
-  - ✅ Green: Stage cleared (shows first clear episode)
-  - 🔄 Orange: Stage in progress (shows current episode)
-  - ⚫ Gray: Stage not attempted
-- **Dark Theme UI**: Modern design with Segoe UI fonts and professional color scheme
-- **Error Handling**: Robust pickle loading with fallback mechanisms for corrupted files
-
-**Technical Features:**
-- `ProgressData`: Class managing individual stage data with modification tracking
-- `ProgressViewerGUI`: Main GUI class with threading for file monitoring
-- Automatic pkl/ directory scanning with multi-action-set support
-- Background monitoring thread with graceful shutdown handling
+- **Savestates**: nes-py has a single C++ backup slot (`_backup`/`_restore`). The planner snapshots at each replan point, rolls candidates out, restores. Because the slot gets reused, `MarioSession.reset()` performs a **hard reset** (console reset + `_skip_start_screen`) instead of relying on the slot. After a console reset the NES RAM persists, so the stale timer must be cleared (`ram[0x07f8:0x07fb] = 0`) or the stage-select writes get skipped and 1-1 loads regardless of target.
+- **Fast rollouts** use `smb._frame_advance()` + direct RAM reads (`RolloutState`), skipping gym bookkeeping — ~950fps/core.
+- **Replan cadence**: a plan that survives its full horizon executes `EXEC_CLEAN` (35) frames before replanning; risky plans replan every 10 frames. Near known hazards the horizon is extended (70 → 120/170 frames) and finer candidate waves engage immediately.
+- **Speed options never change emulation** — only frame pacing and draw frequency (keys 1-5, +/-; MAX draws at most ~30fps wall-clock).
+- **Water detection** via RAM `$0704` swim flag switches the planner to stroke-tap candidates.
+- **Warp/loop guards**: rollouts treat a world/stage change as a heavy penalty (avoids warp zones); real-play x jump-backs (>150px, same area) are recorded as 'loop' hazards.
 
 ## Development Commands
 
-### Setup and Installation
 ```bash
-# Install dependencies using uv
 uv sync
 
-# Run the main application (default: stage 1-1)
-uv run main.py
+# Planner (model-based) agent
+uv run play.py --agent planner --stage 1-1              # UI, 1x
+uv run play.py --agent planner --stage 8-1 --speed max  # UI, fast-forward
+uv run play.py --agent planner --stage 2-2 --headless   # no UI, max speed
+uv run play.py --agent planner --stage 1-1 --no-vision  # rollout-only planning
 
-# Run with specific stage (uses specialized strategy if available)
-uv run main.py --stage 7-4  # Uses 10-stage complex strategy
-uv run main.py -s 4-4       # Uses 6-stage maze strategy
-uv run main.py -s 6-2       # Uses 3-stage simple strategy
-uv run main.py -s 1-1       # Uses default strategy
+# Go-Explore (random baseline)
+uv run play.py --agent explore --stage 1-1 --actions right_only
+uv run test.py --stage 1-1                              # legacy CLI (thin wrapper)
 
-# Tune learning parameters for optimization
-uv run main.py --stage 7-4 --x-bin-size 10 --death-penalty 40      # Fine-grained learning
-uv run main.py --stage 4-4 --replay-backoff 160 --epsilon 0.15     # High diversity exploration
-uv run main.py --stage 1-1 --stall-time 1.5 --ucb-c 1.8          # Aggressive stall detection
+# Verify all target stages in parallel (headless)
+uv run verify.py                                        # 29 stages, logs/ + db/planner.sqlite
+uv run verify.py --stages 8-1 7-4 --episodes 60 --workers 8
 
-# Run the Go-Explore test implementation
-uv run test.py --stage 1-1 --episodes 1000                            # Basic Go-Explore run (saves to pkl/)
-uv run test.py --stage 4-2 --actions complex --archive pkl/4-2.pkl    # Complex actions with custom archive
-uv run test.py --fps 120 --max-steps 8000                             # High FPS with extended episodes
-
-# Use original random behavior (disable all learning)
-uv run main.py --stage 1-1 --random                               # Pure random action selection
-
-# Monitor progress across all stages
-python progress_viewer.py                                         # Launch progress dashboard GUI
-
-# Show help for command line options (includes parameter ranges)
-uv run main.py --help
+# Comparison dashboard (random pkl vs planner sqlite; stdlib only)
+python3 progress_viewer.py
 ```
 
-### Runtime Controls
-- **R key**: Reset current episode and start new one
-- **ESC key**: Exit the program
+Note: the uv-managed CPython 3.8 has a broken Tcl/Tk setup on this machine — run the dashboard with **system** `python3` (it is dependency-free on purpose).
 
-## Dependencies and Environment
+### Runtime keys (pygame UI)
 
-### Key Libraries (from pyproject.toml):
-- `gym-super-mario-bros>=7.4.0`: Super Mario Bros. Gym environment
-- `pygame>=2.6.1`: Game display and UI rendering
-- `matplotlib>=3.7.5`: Currently unused but available for future data visualization
-- `opencv-python>=4.11.0.86`: Currently unused but available for future computer vision features
+`1-5` speed presets · `+/-` speed step · `P` pause · `V` vision overlay · `R` reset episode · `ESC` quit
 
-### Python Version
-- Requires Python 3.8+
-- Uses `uv` for dependency management (uv.lock file present)
+## Testing / Validation
 
-## Code Patterns
-
-### Global State Management
-The code uses extensive global variables for state management:
-- Screen and display objects (`screen`, `clock`, fonts)
-- Controller image and geometry data
-- Game state variables (positions, action sets, feedback mechanisms)
-
-### Configuration-Driven Approach
-Action behaviors are controlled through multiple sophisticated systems:
-
-**Stage Configuration:**
-- `STAGE_STRATEGIES` dictionary defines position-based action sets per stage
-- `setup_stage_strategy()` function dynamically configures behavior
-- Easy to add new stages by extending the configuration
-
-**Learning Parameters:**
-All bandit learning parameters are configurable via command line arguments:
-- `--x-bin-size`: Binning granularity (10-40, smaller=local optimization, larger=generalization)
-- `--replay-backoff`: Early exploration distance (80-160, larger=more diversity)
-- `--stall-time`: Stagnation sensitivity (1.5-3.0 seconds)
-- `--death-penalty`: Learning penalty for deaths (20-40, adjust by stage difficulty)
-- `--epsilon`: Random exploration rate (0.05-0.20)
-- `--ucb-c`: UCB exploration strength (0.8-2.0)
-
-**Adaptive Systems:**
-- `get_x_bin()`: Maps positions to learning bins
-- `choose_action_with_bandit()`: Statistical action selection
-- `update_bandit_from_transition()`: Enhanced reward-based learning updates with time penalty, backtrack detection, and stall penalty
-
-### Advanced Learning Features (v2 Improvements)
-
-**Exponential Decay System:**
-- `DECAY = 0.99`: Applies exponential decay to bandit statistics for non-stationary adaptation
-- Past statistics are weighted down to help escape local optima
-- Enables better adaptation to environment changes
-
-**Enhanced Reward System:**
-- Time penalty: -0.01 per decision to favor faster progress
-- Backtrack penalty: -2.0 when X position decreases
-- Stall penalty: -1.0 during detected stagnation periods
-- Dynamic reward calculation based on progress patterns
-
-**Persistent Storage System:**
-- `save_stats(stage)` and `load_stats(stage)`: JSON-based persistence per stage
-- Automatic saving every 100 episodes and on program exit
-- Cross-session learning continuity with stage-specific statistics
-
-**Top-K Replay Diversity:**
-- `TOP_K_SEQUENCES = 5`: Maintains multiple successful sequences instead of just one
-- `calculate_sequence_diversity()`: Edit distance-based diversity scoring
-- Minimum diversity threshold prevents overly similar sequences
-- Random sequence selection (20% probability) from Top-K during replay
-- ±20px randomization of replay cutoff positions for exploration variety
-
-### Auto-Resource Management
-The application automatically downloads required assets (controller image) from external sources if not present locally.
-
-## File Structure
-```
-randomario/
-├── fig/                    # Contains controller image assets
-│   └── famicon01_01.png   # Nintendo Famicom controller image (auto-downloaded)
-├── main.py                # Single main application file (~1100+ lines)
-├── pyproject.toml         # Project configuration and dependencies
-├── uv.lock               # Dependency lock file
-├── .gitignore            # Excludes auto-generated files
-├── bandit_*.json         # Learning statistics (auto-generated, gitignored)
-├── CLAUDE.md             # This development guide
-└── README.md             # Project documentation (Japanese)
-```
-
-**Generated Files:**
-- `bandit_{stage}.json`: Persistent learning statistics per stage containing:
-  - `bandit`: X-bin action statistics with exponential decay weights
-  - `sequences`: Top-K successful action sequences with diversity scores
-  - Automatically saved every 100 episodes and on exit
-  - Stage-specific format (e.g., `bandit_1_1.json`, `bandit_7_4.json`)
-
-## Development Notes
-
-### Testing and Validation
 ```bash
-# Syntax validation
-uv run python -c "import main; print('Syntax check passed')"
-
-# Quick functionality test (run for a few episodes)
-timeout 30s uv run main.py --stage 1-1
-
-# Performance parameter testing
-uv run main.py --stage 1-1 --random  # Test legacy mode
+uv run python -c "import mario.planner, mario.vision, mario.ui; print('ok')"   # import check
+timeout 60 uv run play.py --agent planner --stage 1-1 --headless --episodes 1  # 1-1 clears in ~30s
+uv run verify.py --stages 1-1 1-4 2-2 --episodes 5 --workers 3                 # smoke multi-type
 ```
 
-No formal test framework is implemented. Testing is primarily done through runtime execution and parameter validation.
+There is no formal test framework; validation is via headless runs. 1-1, 1-2, 1-4 (castle), 2-2 (water) are known to clear on episode 1.
 
-### Common Issues and Debugging
+## Data / Storage
 
-**JSON Serialization Errors:**
-```bash
-# If numpy types cause JSON errors, check convert_numpy_types() function
-# Error: "Object of type int64 is not JSON serializable"
-```
+- `db/planner.sqlite` (gitignored): tables `hazards`, `blacklist`, `episodes`, `clears`. WAL mode for parallel verification workers.
+- `pkl/*.pkl`: Go-Explore archives. Legacy files pickled the Cell class as `__main__.Cell` / `test.Cell`; always load through `mario.agent_explore.load_archive()` (CellUnpickler) — plain `pickle.load` breaks.
+- `logs/verify_{stage}.log`: per-stage verification logs.
 
-**Performance Tuning:**
-```bash
-# Monitor learning progress with debug output
-uv run main.py --stage 1-1 2>&1 | grep "DEBUG\|Top-K\|sequence"
+## Gotchas
 
-# Test different learning parameters
-uv run main.py --stage 4-4 --x-bin-size 15 --ucb-c 1.5  # Fine-tune difficult stages
-uv run main.py --stage 1-1 --epsilon 0.05 --stall-time 1.5  # Conservative exploration
-```
-
-**Data Reset:**
-```bash
-# Clear learning statistics for fresh start
-rm bandit_*.json
-
-# Verify clean state
-ls bandit_*.json  # Should show "No such file or directory"
-```
-
-### AI Enhancement Features
-The project implements advanced learning capabilities:
-
-**Current AI Systems:**
-- **Bandit Learning**: UCB1 + ε-greedy for position-aware action optimization
-- **Adaptive Replay**: X-coordinate based early cutoff from successful sequences
-- **Stall Detection**: Automatic boost mode when progress stagnates
-- **Reward Learning**: Death penalties and progress rewards shape behavior
-
-**Future Enhancement Areas:**
-Based on dependencies, the project is designed to support:
-- Computer vision-based agents (opencv-python available)
-- Data visualization and analysis (matplotlib available)  
-- More sophisticated reinforcement learning algorithms
-- LinUCB/Thompson sampling contextual bandits
-- Macro-action (option) hierarchical learning
-
-### Localization
-The project includes extensive Japanese documentation and comments, indicating a bilingual codebase.
+- `env.step` raises `ValueError: cannot step in a done environment` — always check `done` and reset via `MarioSession.reset()` (never `env.reset()`, which would restore the reused backup slot mid-level).
+- A fresh jump requires releasing A first; the planner inserts a release frame automatically (`_release_guard`) when consecutive plans both hold A.
+- gym 0.26 API-compat wrappers are intentionally bypassed; `MarioSession.step` returns the classic 4-tuple.
+- Frames returned by the env are views into the emulator screen buffer — `.copy()` before storing (vision stores grayscale copies).
