@@ -88,6 +88,7 @@ class PlannerAgent:
         result, cause, detail = None, '', {}
         area = int(session.smb.ram[0x0760])
         episode_plans = []  # (x0, sig, frame) history for blame assignment
+        episode_actions = []  # every executed action, for deterministic replay
         xy_history = deque(maxlen=700)  # (x, y) per frame, for lane profiles
         self.planner.recent_xy = xy_history
 
@@ -104,6 +105,7 @@ class PlannerAgent:
                 obs, reward, done, info = session.step(action)
                 frames += 1
                 last_action = action
+                episode_actions.append(action)
                 self.last_info = info
                 self.last_frame = obs
                 if self.vision is not None:
@@ -191,7 +193,8 @@ class PlannerAgent:
         if result not in ('abort', 'reset'):
             self.memory.record_episode(
                 self.stage, self.run_id, self.episode, result, cause, max_x,
-                frames, int(self.last_info.get('time', 0)), wall)
+                frames, int(self.last_info.get('time', 0)), wall,
+                actions=episode_actions)
         self.log(f"[{self.stage}] ep{self.episode}: {result}({cause}) "
                  f"max_x={max_x} frames={frames} wall={wall:.1f}s "
                  f"plans={self.planner.plans_total}")

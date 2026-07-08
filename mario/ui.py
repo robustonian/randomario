@@ -413,6 +413,8 @@ class GameUI:
         if state['first_clear'] == state['episode']:
             sub += "  ·  FIRST CLEAR"
         line2 = self.font_big.render(sub, True, GOOD)
+        if line2.get_width() > GAME_W - 68:
+            line2 = self.font.render(sub, True, GOOD)
         width = max(440, line1.get_width() + 60, line2.get_width() + 60)
         box = pygame.Rect(0, 0, min(width, GAME_W - 8), 150)
         box.center = (cx, cy)

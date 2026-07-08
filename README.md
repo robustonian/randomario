@@ -51,6 +51,18 @@ uv run play.py --agent planner --stage 8-1 --speed max
 uv run play.py --agent planner --stage 2-2 --headless   # UIなし最速
 ```
 
+### リプレイ(記録済みランの再生)
+
+プランナー実行時に各エピソードの入力列が自動記録されます。リプレイモードは、直近でクリアに到達したランを **EP1〜クリアエピソードまでプランニングなしの一定fps** で再生し、最後にクリア祝福を表示します(実行中の速度変更も可能)。
+
+```bash
+uv run play.py --agent replay --stage 1-1              # 直近のクリアランを再生
+uv run play.py --agent replay --stage 1-1 --speed 4x   # 4倍速で再生
+uv run play.py --agent replay --stage 1-1 --run-id 20260708-091616  # ラン指定
+```
+
+Rキーで次のエピソードへスキップできます。※入力記録の追加以前に実行されたランは再生できません(プランナーを一度走らせて記録を作ってください)。
+
 ### ランダム攻略(Go-Explore)
 
 ```bash

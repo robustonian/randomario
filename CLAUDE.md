@@ -27,6 +27,8 @@ mario/
 ├── memory.py         # PlannerMemory: SQLite (WAL) hazards, plan blacklist, episodes, clears
 ├── agent_planner.py  # PlannerAgent: episode loop, stall/loop/warp detection, death analysis
 ├── agent_explore.py  # GoExploreAgent + Cell + CellUnpickler (loads legacy __main__.Cell pickles)
+├── replay.py         # ReplayAgent: deterministic replay of recorded planner runs
+│                     # (planner stores per-episode input sequences in episodes.actions)
 └── ui.py             # GameUI: shared pygame UI, runtime speed control (1x..8x/MAX),
                       # vision overlay, controller visualization
 play.py               # unified CLI entry point (--agent planner|explore)
@@ -54,6 +56,10 @@ uv run play.py --agent planner --stage 1-1              # UI, 1x
 uv run play.py --agent planner --stage 8-1 --speed max  # UI, fast-forward
 uv run play.py --agent planner --stage 2-2 --headless   # no UI, max speed
 uv run play.py --agent planner --stage 1-1 --no-vision  # rollout-only planning
+
+# Replay a recorded planner run (ep1 -> clear, no planning, steady fps)
+uv run play.py --agent replay --stage 1-1              # latest cleared run
+uv run play.py --agent replay --stage 1-1 --run-id 20260708-091616
 
 # Go-Explore (random baseline)
 uv run play.py --agent explore --stage 1-1 --actions right_only

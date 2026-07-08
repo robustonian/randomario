@@ -13,8 +13,12 @@ import sys
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description='RandoMario — Super Mario Bros. agents')
-    p.add_argument('--agent', choices=['planner', 'explore'], default='planner',
-                   help='planner: model-based lookahead agent / explore: Go-Explore random baseline')
+    p.add_argument('--agent', choices=['planner', 'explore', 'replay'], default='planner',
+                   help='planner: model-based lookahead agent / explore: Go-Explore '
+                        'random baseline / replay: replay a recorded planner run '
+                        '(ep1 through the clear, no planning, steady fps)')
+    p.add_argument('--run-id', default=None,
+                   help='Which recorded run to replay (default: latest cleared run)')
     p.add_argument('--stage', '-s', default='1-1', help='Stage like 1-1 ... 8-4')
     p.add_argument('--episodes', '-e', type=int, default=None,
                    help='Max episodes (default: planner 50 / explore 1000)')
@@ -53,10 +57,10 @@ def main(argv=None):
     if not args.headless:
         from mario.ui import GameUI
         from mario.actions import ACTION_SETS
-        actions = ACTION_SETS['planner' if args.agent == 'planner' else args.actions]
-        ui = GameUI(args.stage, actions,
-                    'Planner (model-based)' if args.agent == 'planner' else 'Go-Explore (random)',
-                    speed=speed)
+        actions = ACTION_SETS[args.actions if args.agent == 'explore' else 'planner']
+        names = {'planner': 'Planner (model-based)', 'explore': 'Go-Explore (random)',
+                 'replay': 'Replay'}
+        ui = GameUI(args.stage, actions, names[args.agent], speed=speed)
 
     try:
         if args.agent == 'planner':
@@ -71,6 +75,13 @@ def main(argv=None):
                 max_frames_per_episode=args.max_frames)
             out = agent.run(max_episodes=args.episodes or 50,
                             stop_on_clear=not args.no_stop_on_clear)
+        elif args.agent == 'replay':
+            from mario.replay import ReplayAgent
+            from mario.memory import PlannerMemory, PLANNER_DB_PATH
+            agent = ReplayAgent(args.stage,
+                                memory=PlannerMemory(args.db or PLANNER_DB_PATH),
+                                ui=ui, run_id=args.run_id)
+            out = agent.run()
         else:
             from mario.agent_explore import GoExploreAgent
             agent = GoExploreAgent(

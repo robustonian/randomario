@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS episodes (
     frames INTEGER,
     game_time_left INTEGER,
     wall_sec REAL,
-    created REAL
+    created REAL,
+    actions BLOB
 );
 CREATE TABLE IF NOT EXISTS clears (
     id INTEGER PRIMARY KEY,
@@ -72,6 +73,10 @@ class PlannerMemory:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA busy_timeout=30000")
         self.db.executescript(_SCHEMA)
+        # Older DBs predate the replay feature: add the column in place.
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(episodes)")}
+        if 'actions' not in cols:
+            self.db.execute("ALTER TABLE episodes ADD COLUMN actions BLOB")
         self.db.commit()
         self._hazard_cache: Dict[str, List[dict]] = {}
         self._blacklist_cache: Dict[str, set] = {}
@@ -127,18 +132,44 @@ class PlannerMemory:
     # ---------------------------------------------------------------- results
 
     def record_episode(self, stage: str, run_id: str, ep: int, result: str, cause: str,
-                       max_x: int, frames: int, game_time_left: int, wall_sec: float):
+                       max_x: int, frames: int, game_time_left: int, wall_sec: float,
+                       actions: Optional[List[int]] = None):
+        blob = bytes(actions) if actions else None
         self.db.execute(
             "INSERT INTO episodes(stage, run_id, ep, result, cause, max_x, frames,"
-            " game_time_left, wall_sec, created) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            " game_time_left, wall_sec, created, actions) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (stage, run_id, ep, result, cause, max_x, frames, game_time_left,
-             wall_sec, time.time()))
+             wall_sec, time.time(), blob))
         if result == 'clear':
             self.db.execute(
                 "INSERT INTO clears(stage, run_id, ep, frames, wall_sec, game_time_left, created)"
                 " VALUES (?,?,?,?,?,?,?)",
                 (stage, run_id, ep, frames, wall_sec, game_time_left, time.time()))
         self.db.commit()
+
+    def replay_episodes(self, stage: str, run_id: Optional[str] = None) -> List[dict]:
+        """Episodes (with recorded inputs) of a run that reached a clear:
+        ep1 .. the first clear episode, ready for deterministic replay."""
+        if run_id is None:
+            row = self.db.execute(
+                "SELECT run_id FROM episodes WHERE stage=? AND result='clear'"
+                " AND actions IS NOT NULL ORDER BY created DESC LIMIT 1",
+                (stage,)).fetchone()
+            if row is None:
+                return []
+            run_id = row[0]
+        rows = self.db.execute(
+            "SELECT ep, result, cause, max_x, frames, actions FROM episodes"
+            " WHERE stage=? AND run_id=? AND actions IS NOT NULL ORDER BY ep",
+            (stage, run_id)).fetchall()
+        out = []
+        for ep, result, cause, max_x, frames, blob in rows:
+            out.append({'ep': ep, 'result': result, 'cause': cause, 'max_x': max_x,
+                        'frames': frames, 'actions': list(blob or b''),
+                        'run_id': run_id})
+            if result == 'clear':
+                break
+        return out
 
     def stage_summary(self, stage: str) -> dict:
         ep_row = self.db.execute(
