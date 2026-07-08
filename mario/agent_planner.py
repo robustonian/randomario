@@ -12,6 +12,8 @@ import time
 from collections import deque
 from typing import Optional
 
+import numpy as np
+
 from .env_utils import MarioSession
 from .actions import ACTION_SETS
 from .memory import PlannerMemory
@@ -28,8 +30,14 @@ class PlannerAgent:
                  log=print):
         self.stage = stage
         self.session = MarioSession(stage, ACTION_SETS['planner'])
+        # Planning happens on a SHADOW emulator. nes-py's savestate restore is
+        # imperfect once frames advance between backup and restore (PPU phase
+        # leaks, shifting lag frames), so rollouts slowly corrupt the emulator
+        # they run on. Keeping the play emulator rollout-free makes the real
+        # trajectory a pure function of its inputs — i.e. always replayable.
+        self.shadow = MarioSession(stage, ACTION_SETS['planner'])
         self.memory = memory if memory is not None else PlannerMemory()
-        self.planner = Planner(self.session, self.memory)
+        self.planner = Planner(self.shadow, self.memory)
         self.ui = ui
         if ui is not None and hasattr(ui, 'pump'):
             self.planner.pump = ui.pump
@@ -45,6 +53,28 @@ class PlannerAgent:
         self.last_info = {}
         self.last_frame = None
         self.first_clear_episode = None
+
+    def _resync_shadow(self, episode_actions) -> None:
+        """Rebuild the planning emulator from the play emulator's input
+        history (the play emulator is pure, so replaying its inputs
+        reproduces it exactly)."""
+        self.shadow.reset()
+        for a in episode_actions:
+            if self.shadow.smb.done:
+                break
+            self.shadow.step(a)
+
+    def _validate_replay(self, actions) -> bool:
+        """Replay the recorded inputs from a fresh reset and confirm they
+        reach the flag again. Guarantees that stored 'clear' recordings are
+        actually reproducible before they ever land in the DB."""
+        session = self.session
+        obs, info = session.reset()
+        for a in actions:
+            obs, reward, done, info = session.step(a)
+            if done:
+                return bool(info.get('flag_get'))
+        return False
 
     # ------------------------------------------------------- death analysis
 
@@ -71,6 +101,8 @@ class PlannerAgent:
         self.episode += 1
         t0 = time.time()
         obs, info = session.reset()
+        self.shadow.reset()  # canonical reset: both emulators now identical
+        resyncs = 0
         if self.vision is not None:
             self.vision.reset()
             self.vision.update(obs, info)
@@ -106,6 +138,18 @@ class PlannerAgent:
                 frames += 1
                 last_action = action
                 episode_actions.append(action)
+                # Mirror the step on the planning emulator; repair it from the
+                # input history whenever rollout leakage made it drift.
+                if not done:
+                    if not self.shadow.smb.done:
+                        try:
+                            self.shadow.step(action)
+                        except ValueError:
+                            pass
+                    if self.shadow.smb.done or not np.array_equal(
+                            session.smb.ram, self.shadow.smb.ram):
+                        resyncs += 1
+                        self._resync_shadow(episode_actions)
                 self.last_info = info
                 self.last_frame = obs
                 if self.vision is not None:
@@ -190,18 +234,25 @@ class PlannerAgent:
                     self.memory.blacklist_plan(self.stage, px0, psig)
         if result == 'clear' and self.first_clear_episode is None:
             self.first_clear_episode = self.episode
+        validated = True
         if result not in ('abort', 'reset'):
+            actions_to_store = episode_actions
+            if result == 'clear' and not self._validate_replay(episode_actions):
+                self.log(f"[{self.stage}] WARNING: clear recording failed replay "
+                         f"validation — inputs not stored")
+                actions_to_store = None
+                validated = False
             self.memory.record_episode(
                 self.stage, self.run_id, self.episode, result, cause, max_x,
                 frames, int(self.last_info.get('time', 0)), wall,
-                actions=episode_actions)
+                actions=actions_to_store)
         self.log(f"[{self.stage}] ep{self.episode}: {result}({cause}) "
                  f"max_x={max_x} frames={frames} wall={wall:.1f}s "
-                 f"plans={self.planner.plans_total}")
+                 f"plans={self.planner.plans_total} resyncs={resyncs}")
         if result == 'clear' and self.ui is not None and hasattr(self.ui, 'celebrate'):
             self.ui.celebrate(self)
         return {'result': result, 'cause': cause, 'max_x': max_x,
-                'frames': frames, 'wall': wall}
+                'frames': frames, 'wall': wall, 'validated': validated}
 
     # ------------------------------------------------------------------- UI
 
@@ -238,7 +289,8 @@ class PlannerAgent:
                     break
                 if out['result'] == 'clear':
                     cleared = True
-                    if stop_on_clear:
+                    # Keep playing until we hold a *reproducible* recording.
+                    if stop_on_clear and out.get('validated', True):
                         break
             # Flush any frames still waiting in the SMOOTH playback buffer so
             # the run's final moments are actually shown before closing.
@@ -246,6 +298,7 @@ class PlannerAgent:
                 self.ui.drain()
         finally:
             self.session.close()
+            self.shadow.close()
         return {
             'stage': self.stage,
             'cleared': cleared,

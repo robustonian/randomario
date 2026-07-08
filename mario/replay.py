@@ -66,11 +66,13 @@ class ReplayAgent:
             self.log(f"[{self.stage}] replaying ep{epi['ep']} "
                      f"({epi['result']}, {len(epi['actions'])} frames)")
 
+            flag_seen = False
             for action in epi['actions']:
                 obs, reward, done, info = self.session.step(action)
                 self._frame_idx += 1
                 self.last_frame, self.last_info = obs, info
                 self.best_x = max(self.best_x, int(info.get('x_pos', 0)))
+                flag_seen = flag_seen or bool(info.get('flag_get'))
                 if self.ui is not None:
                     cmd = self.ui.on_frame(self, action)
                     if cmd == 'quit':
@@ -81,7 +83,12 @@ class ReplayAgent:
                 if done:
                     break
 
-            if not quit_requested and epi['result'] == 'clear' \
+            if epi['result'] == 'clear' and not flag_seen and not quit_requested:
+                # Should not happen for recordings made after replay
+                # validation was added; be loud rather than celebrate a lie.
+                self.log(f"[{self.stage}] WARNING: recorded clear (ep{epi['ep']}) "
+                         f"did not reproduce on replay")
+            if not quit_requested and flag_seen \
                     and self.ui is not None and hasattr(self.ui, 'celebrate'):
                 self.ui.celebrate(self, seconds=5.0)
 

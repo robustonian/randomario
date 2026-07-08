@@ -32,6 +32,11 @@ FLAG_BONUS = 5000.0
 DEATH_PENALTY = 1200.0
 WARP_PENALTY = 3000.0
 
+# With little game-clock left, waiting is no longer safe: charge candidates
+# per frame so forward progress dominates (dash earns ~2.5px/frame ≫ cost).
+URGENT_TIME_LEFT = 90
+URGENT_FRAME_COST = 0.6
+
 # Rollouts are exact, so a plan that survived its horizon (and tail) can be
 # executed for a good chunk of that horizon before replanning.
 EXEC_CLEAN = 50
@@ -141,11 +146,13 @@ class EdgeJumpPolicy:
     def step(self, x: int, i: int) -> int:
         idx = self.idx
         if self.phase == 0:
-            if self.back_px <= 0 or x <= self.start_x - self.back_px or i > 110:
+            if self.back_px <= 0 or x <= self.start_x - self.back_px or i > 150:
                 self.phase = 1
                 self.counter = 6 if self.back_px > 0 else 0
             else:
-                return idx['LEFT']
+                # Hop-retreat: plain walking gets pinned on staircase steps,
+                # so alternate jump/walk to climb backwards over them.
+                return idx['LEFT_JUMP'] if (i % 20) < 10 else idx['LEFT']
         if self.phase == 1:
             if self.counter > 0:
                 self.counter -= 1
@@ -282,6 +289,14 @@ class Planner:
                                 ('RIGHT_DASH', h))))
         c.append(('walkonly', self._seq(('RIGHT', h))))
         c.append(('idle', self._seq(('NOOP', h))))
+        # Tall wall right ahead (pipe / staircase pocket): back off far and
+        # take a running full jump, sweeping the takeoff distance.
+        x_here = self.session.x_pos
+        for back, margin in ((90, 24), (90, 40), (130, 55), (130, 70),
+                             (130, 85), (160, 100)):
+            pol = EdgeJumpPolicy(self.idx, x_here, x_here + 8, back, margin, 32)
+            pol.min_horizon = 180 + back
+            c.append((f'walljump-b{back}m{margin}', pol))
         for hold in (22, 32):
             c.append((f'upjump{hold}',
                       self._seq(('JUMP', hold), ('RIGHT_DASH', h))))
@@ -384,7 +399,7 @@ class Planner:
     # ------------------------------------------------------------ evaluation
 
     def _evaluate(self, actions, horizon: int, x0: int, y0: int = 0,
-                  record_traj: bool = False) -> dict:
+                  record_traj: bool = False, urgent: bool = False) -> dict:
         """actions: list of action indices, or a closed-loop policy object
         with .step(x, i). For policies the emitted actions are recorded."""
         session = self.session
@@ -431,6 +446,8 @@ class Planner:
             # x is blocked: reward gaining height on something solid
             # (elevators, vines, climbing to an upper route).
             score += 0.4 * max(0, y_tail[-1] - y0)
+        if urgent:
+            score -= URGENT_FRAME_COST * frames
         if flag:
             score += FLAG_BONUS - frames
         if died:
@@ -451,12 +468,16 @@ class Planner:
         stage = session.stage
         swimming = session.is_swimming
 
+        urgent = self.session.time_left < URGENT_TIME_LEFT
         hazard_near = False
         hazard_hot = False
         loop_zone = False
         loop_xs = []
         if self.memory is not None:
-            hs = self.memory.hazards_in(stage, x0, x0 + 280)
+            # Timeout hazards must NOT trigger the cautious (slow) machinery —
+            # the cure for running out of time is speed, not longer waits.
+            hs = [h for h in self.memory.hazards_in(stage, x0, x0 + 280)
+                  if h['cause'] != 'timeout']
             hazard_near = bool(hs)
             # Died here repeatedly: skip straight to the fine search.
             hazard_hot = any(h['hits'] >= 2 for h in hs)
@@ -509,7 +530,8 @@ class Planner:
                         if self.memory is not None and self.memory.is_blacklisted(stage, x0, sig):
                             continue
                     n_candidates += 1
-                    meta = self._evaluate(seq, h_eff, x0, y0, record_traj=loop_zone)
+                    meta = self._evaluate(seq, h_eff, x0, y0,
+                                          record_traj=loop_zone, urgent=urgent)
                     session.restore()
                     if loop_zone:
                         # Warping back is still worth more than waiting forever
@@ -581,7 +603,8 @@ class Planner:
                         if self.pump is not None:
                             self.pump()
                         ext_seq = list(seq) + filler
-                        ext = self._evaluate(ext_seq, len(ext_seq), x0, y0)
+                        ext = self._evaluate(ext_seq, len(ext_seq), x0, y0,
+                                             urgent=urgent)
                         session.restore()
                         ok = not ext['died'] and not ext['warp']
                         # Penalize by how soon after the plan the doom hits;

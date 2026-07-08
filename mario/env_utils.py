@@ -72,10 +72,12 @@ class MarioSession:
         smb._has_backup = False
         smb._will_reset()
         _nes._LIB.Reset(smb._env)
-        # A console reset keeps RAM contents, so the stale in-game timer would
-        # make _skip_start_screen think the level already started and skip the
-        # stage-select RAM writes (loading 1-1). Clear it first.
-        smb.ram[0x07f8:0x07fb] = 0
+        # A console reset keeps RAM contents. Leftover state (in-game timer,
+        # SMB's PRNG registers, demo timers) would make the start-screen skip
+        # take a history-dependent number of frames, so episodes would not be
+        # reproducible in isolation (broke replay on 8-1). Zero all RAM for a
+        # canonical cold-boot start every episode.
+        smb.ram[:] = 0
         smb._did_reset()
         smb._skip_start_screen()
         smb._did_reset()
