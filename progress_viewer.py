@@ -142,6 +142,26 @@ def read_planner_statuses(db_path: str = PLANNER_DB_PATH) -> Dict[str, StageStat
     return out
 
 
+def read_replay_statuses(db_path: str = PLANNER_DB_PATH) -> Dict[str, int]:
+    """Stage -> clear episode of the recorded (replayable) run: the run that
+    `play.py --agent replay` will show, i.e. episodes 1..N ending in a clear
+    with verified input recordings."""
+    out: Dict[str, int] = {}
+    if not os.path.exists(db_path):
+        return out
+    try:
+        db = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
+        # SQLite bare-column + MAX(): ep comes from the newest matching row.
+        for stage, ep, _ in db.execute(
+                "SELECT stage, ep, MAX(created) FROM episodes"
+                " WHERE result='clear' AND actions IS NOT NULL GROUP BY stage"):
+            out[stage] = ep
+        db.close()
+    except Exception:
+        pass
+    return out
+
+
 class Dashboard:
     REFRESH_MS = 2000
 
@@ -159,8 +179,9 @@ class Dashboard:
         tk.Label(self.root, text='🍄 Super Mario Bros. — Random vs Planner',
                  font=FONT_TITLE, bg=BG, fg=TEXT).pack(pady=(14, 2))
         tk.Label(self.root,
-                 text='RND = Go-Explore(random, pkl/)   PLN = model-based planner (db/planner.sqlite)   '
-                      '✅ cleared(first-clear ep)   🔄 best x / episodes   loop stages excluded for PLN',
+                 text='RND = Go-Explore(random)   PLN = planner first clear   '
+                      'RPL = recorded replayable run (episodes to clear, --agent replay)   '
+                      '✅ cleared   🔄 best x / episodes   loop stages excluded for PLN',
                  font=FONT_SMALL, bg=BG, fg=TEXT_DIM).pack(pady=(0, 10))
 
         grid = tk.Frame(self.root, bg=BG)
@@ -182,7 +203,8 @@ class Dashboard:
                 tk.Label(cf, text=head, font=FONT_BOLD, bg=PANEL_LIGHT,
                          fg=TEXT).pack(anchor='w', padx=6, pady=(3, 0))
                 rows = {}
-                for key, label in (('random', 'RND'), ('planner', 'PLN')):
+                for key, label in (('random', 'RND'), ('planner', 'PLN'),
+                                   ('replay', 'RPL')):
                     rf = tk.Frame(cf, bg=PANEL_LIGHT)
                     rf.pack(fill='x', padx=6)
                     tk.Label(rf, text=label, font=FONT_SMALL, bg=PANEL_LIGHT,
@@ -204,19 +226,27 @@ class Dashboard:
 
     def refresh(self):
         planner = read_planner_statuses()
-        rnd_cleared = pln_cleared = 0
+        replay = read_replay_statuses()
+        rnd_cleared = pln_cleared = rpl_ready = 0
         target = [s for s in ALL_STAGES if s not in LOOP_STAGES]
         for stage in ALL_STAGES:
             rnd = read_random_status(stage)
             pln = planner.get(stage, StageStatus())
+            rpl_ep = replay.get(stage)
             self.cells[stage]['random'].config(text=rnd.text, fg=rnd.color)
             self.cells[stage]['planner'].config(text=pln.text, fg=pln.color)
+            if rpl_ep is not None:
+                self.cells[stage]['replay'].config(text=f'🎬 EP{rpl_ep}', fg=BLUE)
+            else:
+                self.cells[stage]['replay'].config(text='—', fg=TEXT_DIM)
             if stage in target:
                 rnd_cleared += rnd.cleared
                 pln_cleared += pln.cleared
+                rpl_ready += rpl_ep is not None
         self.summary_var.set(
             f'target stages ({len(target)}): random {rnd_cleared}/{len(target)} · '
-            f'planner {pln_cleared}/{len(target)} · updated {time.strftime("%H:%M:%S")}')
+            f'planner {pln_cleared}/{len(target)} · '
+            f'replayable {rpl_ready}/{len(target)} · updated {time.strftime("%H:%M:%S")}')
 
     def _schedule(self):
         self.refresh()

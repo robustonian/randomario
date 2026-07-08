@@ -176,9 +176,10 @@ class GameUI:
                     self.show_vision = not self.show_vision
                 elif pygame.K_1 <= event.key <= pygame.K_6:
                     self.speed_idx = event.key - pygame.K_1
-                elif event.key in (pygame.K_PLUS, pygame.K_EQUALS):
+                elif event.key in (pygame.K_PLUS, pygame.K_EQUALS,
+                                   pygame.K_RIGHT, pygame.K_UP):
                     self.speed_idx = min(self.speed_idx + 1, len(SPEED_MODES) - 1)
-                elif event.key == pygame.K_MINUS:
+                elif event.key in (pygame.K_MINUS, pygame.K_LEFT, pygame.K_DOWN):
                     self.speed_idx = max(self.speed_idx - 1, 0)
 
     def _take_cmd(self) -> Optional[str]:
@@ -396,7 +397,7 @@ class GameUI:
         self._rows(rect, py, [(k, v, c) for (k, v, c) in state['rows']])
 
         # Footer
-        keys = "1-6 speed (6=SMOOTH) · +/- speed · P pause · V vision · R reset · ESC quit"
+        keys = "1-6 speed (6=SMOOTH) · ←→/+- speed · P pause · V vision · R reset · ESC quit"
         self.screen.blit(self.font_small.render(keys, True, TEXT_DIM),
                          (GAME_X, WINDOW_H - 32))
         pygame.display.flip()
