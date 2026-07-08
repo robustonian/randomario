@@ -39,7 +39,8 @@ progress_viewer.py    # comparison dashboard (tkinter, stdlib-only: run with sys
 - **Savestates**: nes-py has a single C++ backup slot (`_backup`/`_restore`). The planner snapshots at each replan point, rolls candidates out, restores. Because the slot gets reused, `MarioSession.reset()` performs a **hard reset** (console reset + `_skip_start_screen`) instead of relying on the slot. After a console reset the NES RAM persists, so the stale timer must be cleared (`ram[0x07f8:0x07fb] = 0`) or the stage-select writes get skipped and 1-1 loads regardless of target.
 - **Fast rollouts** use `smb._frame_advance()` + direct RAM reads (`RolloutState`), skipping gym bookkeeping — ~950fps/core.
 - **Replan cadence**: a plan that survives its full horizon executes `EXEC_CLEAN` (35) frames before replanning; risky plans replan every 10 frames. Near known hazards the horizon is extended (70 → 120/170 frames) and finer candidate waves engage immediately.
-- **Speed options never change emulation** — only frame pacing and draw frequency (keys 1-5, +/-; MAX draws at most ~30fps wall-clock).
+- **Speed options never change emulation** — only frame pacing and draw frequency (keys 1-6, +/-; MAX draws at most ~30fps wall-clock).
+- **SMOOTH mode (planner UI default)**: emulation + planning run unthrottled; every frame is snapshotted into a playback buffer (`GameUI.buffer`, cap 240) that the window drains at an adaptive 30-80fps — `Planner` calls `ui.pump()` between rollouts, which keeps playback running *during* the search, hiding thinking pauses behind ~2-4s of display latency. The overlay/HUD data is frozen per frame in `_snapshot_state` so delayed drawing stays in sync.
 - **Water detection** via RAM `$0704` swim flag switches the planner to stroke-tap candidates.
 - **Warp/loop guards**: rollouts treat a world/stage change as a heavy penalty (avoids warp zones); real-play x jump-backs (>150px, same area) are recorded as 'loop' hazards.
 
@@ -70,7 +71,7 @@ Note: the uv-managed CPython 3.8 has a broken Tcl/Tk setup on this machine — r
 
 ### Runtime keys (pygame UI)
 
-`1-5` speed presets · `+/-` speed step · `P` pause · `V` vision overlay · `R` reset episode · `ESC` quit
+`1-6` speed presets (6 = SMOOTH) · `+/-` speed step · `P` pause · `V` vision overlay · `R` reset episode · `ESC` quit
 
 ## Testing / Validation
 

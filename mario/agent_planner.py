@@ -195,6 +195,8 @@ class PlannerAgent:
         self.log(f"[{self.stage}] ep{self.episode}: {result}({cause}) "
                  f"max_x={max_x} frames={frames} wall={wall:.1f}s "
                  f"plans={self.planner.plans_total}")
+        if result == 'clear' and self.ui is not None and hasattr(self.ui, 'celebrate'):
+            self.ui.celebrate(self)
         return {'result': result, 'cause': cause, 'max_x': max_x,
                 'frames': frames, 'wall': wall}
 
@@ -224,15 +226,21 @@ class PlannerAgent:
 
     def run(self, max_episodes: int = 50, stop_on_clear: bool = True) -> dict:
         cleared = False
+        aborted = False
         try:
             while self.episode < max_episodes:
                 out = self.run_episode()
                 if out['result'] == 'abort':
+                    aborted = True
                     break
                 if out['result'] == 'clear':
                     cleared = True
                     if stop_on_clear:
                         break
+            # Flush any frames still waiting in the SMOOTH playback buffer so
+            # the run's final moments are actually shown before closing.
+            if not aborted and self.ui is not None and hasattr(self.ui, 'drain'):
+                self.ui.drain()
         finally:
             self.session.close()
         return {

@@ -19,8 +19,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--episodes', '-e', type=int, default=None,
                    help='Max episodes (default: planner 50 / explore 1000)')
     p.add_argument('--headless', action='store_true', help='No UI, run at max speed')
-    p.add_argument('--speed', default='1x', choices=['1x', '2x', '4x', '8x', 'max'],
-                   help='Initial speed (changeable at runtime with keys 1-5 / +/-)')
+    p.add_argument('--speed', default=None,
+                   choices=['1x', '2x', '4x', '8x', 'max', 'smooth'],
+                   help='Initial speed (runtime keys 1-6 / +/-). smooth = run '
+                        'unthrottled but display via a steady playback buffer '
+                        'that hides planning pauses (default for planner)')
     p.add_argument('--no-vision', action='store_true',
                    help='Disable frame-based vision (planner only)')
     p.add_argument('--no-stop-on-clear', action='store_true',
@@ -43,7 +46,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    speed = args.speed.upper() if args.speed == 'max' else args.speed
+    speed = args.speed or ('smooth' if args.agent == 'planner' else '1x')
+    speed = speed.upper() if speed in ('max', 'smooth') else speed
 
     ui = None
     if not args.headless:

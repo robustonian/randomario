@@ -277,10 +277,15 @@ class GoExploreAgent:
             if reason is not None:
                 self.log(f"[EP] {reason} | ep={self.episode} ep_max_x={self.ep_max_x} "
                          f"best_x={self.best_x} cells={len(self.archive)}")
+                if reason == 'STAGE CLEAR' and self.ui is not None \
+                        and hasattr(self.ui, 'celebrate'):
+                    self.ui.celebrate(self)
                 if self.episode % self.save_every_episodes == 0:
                     self.save_archive()
                 self._start_episode()
 
+        if running and self.ui is not None and hasattr(self.ui, 'drain'):
+            self.ui.drain()
         self.save_archive()
         self.session.close()
         return {
