@@ -139,6 +139,11 @@ def render_single(stage: str, mode: str, out: str):
     print(f"saved: {out} ({rec.frames} frames, {rec.frames / 60:.1f}s)")
 
 
+MARGIN = 16   # outer margin around everything
+GAP = 28      # space between the two panes
+BORDER = 5    # colored frame thickness per pane
+
+
 def render_compare(stage: str, out: str):
     r_name, r_path, r_ep = find_random_recording(stage)
     p_name, p_path, p_ep = find_planner_recording(stage)
@@ -147,15 +152,36 @@ def render_compare(stage: str, out: str):
 
     left = ClearPlayback(stage, r_name, r_path)
     right = ClearPlayback(stage, p_name, p_path)
-    width = PANE_W * 2
-    rec = VideoRecorder(out, size=(width, PANE_H + HEADER_H))
-    bar = label_bar(width,
-                    f"RANDOM  first clear EP{r_ep}",
-                    f"PLANNER  first clear EP{p_ep}")
+
+    pane_outer = PANE_W + 2 * BORDER
+    width = 2 * MARGIN + 2 * pane_outer + GAP
+    height = HEADER_H + PANE_H + 2 * BORDER + 2 * MARGIN
+    lx = MARGIN + BORDER                      # left pane inner x
+    rx = MARGIN + pane_outer + GAP + BORDER   # right pane inner x
+    ty = HEADER_H + MARGIN + BORDER           # panes inner y
+
+    # Static background: dark canvas + colored frame around each pane + labels
+    canvas = np.zeros((height, width, 3), np.uint8)
+    canvas[:] = BG
+    canvas[ty - BORDER: ty + PANE_H + BORDER,
+           lx - BORDER: lx + PANE_W + BORDER] = COL_RANDOM
+    canvas[ty - BORDER: ty + PANE_H + BORDER,
+           rx - BORDER: rx + PANE_W + BORDER] = COL_PLANNER
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    for text, cx, color in (
+            (f"RANDOM (Go-Explore)  first clear EP{r_ep}", lx + PANE_W // 2, COL_RANDOM),
+            (f"PLANNER (model-based)  first clear EP{p_ep}", rx + PANE_W // 2, COL_PLANNER)):
+        (tw, th), _ = cv2.getTextSize(text, font, 1.1, 2)
+        cv2.putText(canvas, text, (cx - tw // 2, (HEADER_H + MARGIN + th) // 2),
+                    font, 1.1, color, 2, cv2.LINE_AA)
+
+    rec = VideoRecorder(out, size=(width, height))
 
     def compose():
-        return np.vstack([bar, np.hstack([upscale(left.frame),
-                                          upscale(right.frame)])])
+        frame = canvas.copy()
+        frame[ty: ty + PANE_H, lx: lx + PANE_W] = upscale(left.frame)
+        frame[ty: ty + PANE_H, rx: rx + PANE_W] = upscale(right.frame)
+        return frame
 
     alive = True
     while alive:
