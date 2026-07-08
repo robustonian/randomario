@@ -252,9 +252,15 @@ class GoExploreAgent:
             if done:
                 if info.get('flag_get'):
                     reason = 'STAGE CLEAR'
+                    # A fresh clear is the most trustworthy recording — always
+                    # adopt it as the best path so replays/videos stay valid
+                    # under the current environment semantics.
+                    self.best_overall_path = list(self.current_path)
+                    self.best_x = max(self.best_x, self.ep_max_x)
                     if self.first_clear_episode is None:
                         self.first_clear_episode = self.episode
                         self.log(f"[MILESTONE] First clear at episode {self.episode}!")
+                    self.save_archive()
                 elif int(info.get('time', 400)) <= 1:
                     reason = 'TIME UP'
                 else:

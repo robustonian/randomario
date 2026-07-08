@@ -19,6 +19,10 @@ def build_parser() -> argparse.ArgumentParser:
                         '(ep1 through the clear, no planning, steady fps)')
     p.add_argument('--run-id', default=None,
                    help='Which recorded run to replay (default: latest cleared run)')
+    p.add_argument('--video', nargs='?', const='auto', default=None, metavar='PATH',
+                   help='Save the replay as a video (near-lossless x264, 4x '
+                        'nearest-neighbor upscale). Default path: '
+                        'videos/replay_{stage}_{timestamp}.mp4 (replay agent only)')
     p.add_argument('--stage', '-s', default='1-1', help='Stage like 1-1 ... 8-4')
     p.add_argument('--episodes', '-e', type=int, default=None,
                    help='Max episodes (default: planner 50 / explore 1000)')
@@ -76,11 +80,19 @@ def main(argv=None):
             out = agent.run(max_episodes=args.episodes or 50,
                             stop_on_clear=not args.no_stop_on_clear)
         elif args.agent == 'replay':
+            import time as _time
             from mario.replay import ReplayAgent
             from mario.memory import PlannerMemory, PLANNER_DB_PATH
+            video = None
+            if args.video:
+                from mario.video import VideoRecorder
+                path = args.video
+                if path == 'auto':
+                    path = f"videos/replay_{args.stage}_{_time.strftime('%Y%m%d-%H%M%S')}.mp4"
+                video = VideoRecorder(path)
             agent = ReplayAgent(args.stage,
                                 memory=PlannerMemory(args.db or PLANNER_DB_PATH),
-                                ui=ui, run_id=args.run_id)
+                                ui=ui, run_id=args.run_id, video=video)
             out = agent.run()
         else:
             from mario.agent_explore import GoExploreAgent

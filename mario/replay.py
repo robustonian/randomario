@@ -15,10 +15,11 @@ from .memory import PlannerMemory
 
 class ReplayAgent:
     def __init__(self, stage: str, memory: Optional[PlannerMemory] = None,
-                 ui=None, run_id: Optional[str] = None, log=print):
+                 ui=None, run_id: Optional[str] = None, video=None, log=print):
         self.stage = stage
         self.memory = memory if memory is not None else PlannerMemory()
         self.ui = ui
+        self.video = video  # optional mario.video.VideoRecorder
         self.log = log
         self.episodes: List[dict] = self.memory.replay_episodes(stage, run_id)
         self.session = MarioSession(stage, ACTION_SETS['planner'])
@@ -73,6 +74,8 @@ class ReplayAgent:
                 self.last_frame, self.last_info = obs, info
                 self.best_x = max(self.best_x, int(info.get('x_pos', 0)))
                 flag_seen = flag_seen or bool(info.get('flag_get'))
+                if self.video is not None:
+                    self.video.add(obs)
                 if self.ui is not None:
                     cmd = self.ui.on_frame(self, action)
                     if cmd == 'quit':
@@ -83,6 +86,18 @@ class ReplayAgent:
                 if done:
                     break
 
+            if self.video is not None and not quit_requested:
+                if flag_seen:
+                    # Keep the emulator rolling past `done` so the video gets
+                    # the flag slide, the walk into the castle and fireworks.
+                    smb = self.session.smb
+                    for _ in range(420):
+                        smb._frame_advance(0)
+                        self.video.add(smb.screen)
+                elif self.last_frame is not None:
+                    # Hold the death frame briefly between episodes.
+                    self.video.add(self.last_frame, repeat=45)
+
             if epi['result'] == 'clear' and not flag_seen and not quit_requested:
                 # Should not happen for recordings made after replay
                 # validation was added; be loud rather than celebrate a lie.
@@ -92,6 +107,11 @@ class ReplayAgent:
                     and self.ui is not None and hasattr(self.ui, 'celebrate'):
                 self.ui.celebrate(self, seconds=5.0)
 
+        if self.video is not None:
+            self.video.close()
+            self.log(f"[{self.stage}] video saved: {self.video.path} "
+                     f"({self.video.frames} frames, "
+                     f"{self.video.frames / self.video.fps:.1f}s)")
         self.session.close()
         return {
             'stage': self.stage,

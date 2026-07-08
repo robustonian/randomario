@@ -59,7 +59,21 @@ uv run play.py --agent planner --stage 2-2 --headless   # UIなし最速
 uv run play.py --agent replay --stage 1-1              # 直近のクリアランを再生
 uv run play.py --agent replay --stage 1-1 --speed 4x   # 4倍速で再生
 uv run play.py --agent replay --stage 1-1 --run-id 20260708-091616  # ラン指定
+
+# 動画ファイルに保存(近ロスレスx264・最近傍4倍拡大 1024x960・60fps)
+uv run play.py --agent replay --stage 1-1 --video                 # videos/ に自動命名
+uv run play.py --agent replay --stage 8-1 --video my_run.mp4 --headless  # 最速で書き出し
 ```
+
+### クリア動画の書き出し(ランダム / プランナー / 左右比較)
+
+```bash
+uv run make_video.py --stage 1-1 --mode compare   # RANDOM|PLANNER を左右に並べた比較動画
+uv run make_video.py --stage 1-1 --mode random    # ランダム(Go-Explore)のクリア経路
+uv run make_video.py --stage 1-1 --mode planner   # プランナーのクリアエピソード
+```
+
+ヘッダーに各エージェントの初クリアEP数を表示し、クリア後の旗滑り〜城入場まで収録します。出力は `videos/` 配下(`--out` で指定可)。
 
 Rキーで次のエピソードへスキップできます。※入力記録の追加以前に実行されたランは再生できません(プランナーを一度走らせて記録を作ってください)。
 

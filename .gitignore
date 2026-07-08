@@ -1,6 +1,7 @@
 # Planner learning/results DB and verification logs (auto-generated)
 db/
 logs/
+videos/
 
 # Python-generated files
 __pycache__/
