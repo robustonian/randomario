@@ -53,6 +53,17 @@ class PlannerAgent:
         self.last_info = {}
         self.last_frame = None
         self.first_clear_episode = None
+        # Fair-benchmark bookkeeping (see benchmark.py)
+        self.real_frames = 0     # frames actually played
+        self.deaths = 0
+        self.wall_total = 0.0
+        self.clear_stats = None  # metrics frozen at the first clear
+
+    @property
+    def total_emulator_frames(self) -> int:
+        """Every frame emulated anywhere: real play + shadow mirroring +
+        rollouts + resyncs + replay validation."""
+        return self.session.frames_emulated + self.shadow.frames_emulated
 
     def _resync_shadow(self, episode_actions) -> None:
         """Rebuild the planning emulator from the play emulator's input
@@ -99,6 +110,7 @@ class PlannerAgent:
     def run_episode(self) -> dict:
         session = self.session
         self.episode += 1
+        rollout_frames_start = self.planner.rollout_frames_total
         t0 = time.time()
         obs, info = session.reset()
         self.shadow.reset()  # canonical reset: both emulators now identical
@@ -245,12 +257,27 @@ class PlannerAgent:
             self.memory.record_episode(
                 self.stage, self.run_id, self.episode, result, cause, max_x,
                 frames, int(self.last_info.get('time', 0)), wall,
-                actions=actions_to_store)
+                actions=actions_to_store,
+                rollout_frames=self.planner.rollout_frames_total - rollout_frames_start)
         self.log(f"[{self.stage}] ep{self.episode}: {result}({cause}) "
                  f"max_x={max_x} frames={frames} wall={wall:.1f}s "
                  f"plans={self.planner.plans_total} resyncs={resyncs}")
         if result == 'clear' and self.ui is not None and hasattr(self.ui, 'celebrate'):
             self.ui.celebrate(self)
+        self.real_frames += frames
+        self.wall_total += wall
+        if result == 'death':
+            self.deaths += 1
+        if result == 'clear' and self.clear_stats is None:
+            self.clear_stats = {
+                'clear_ep': self.episode,
+                'real_frames': self.real_frames,
+                'rollout_frames': self.planner.rollout_frames_total,
+                'total_frames': self.total_emulator_frames,
+                'wall_sec': self.wall_total,
+                'deaths': self.deaths,
+                'validated': validated,
+            }
         return {'result': result, 'cause': cause, 'max_x': max_x,
                 'frames': frames, 'wall': wall, 'validated': validated}
 
@@ -278,7 +305,8 @@ class PlannerAgent:
 
     # ------------------------------------------------------------------ run
 
-    def run(self, max_episodes: int = 50, stop_on_clear: bool = True) -> dict:
+    def run(self, max_episodes: int = 50, stop_on_clear: bool = True,
+            frame_budget: Optional[int] = None) -> dict:
         cleared = False
         aborted = False
         try:
@@ -292,6 +320,10 @@ class PlannerAgent:
                     # Keep playing until we hold a *reproducible* recording.
                     if stop_on_clear and out.get('validated', True):
                         break
+                if frame_budget is not None and self.total_emulator_frames >= frame_budget:
+                    self.log(f"[{self.stage}] frame budget exhausted "
+                             f"({self.total_emulator_frames}/{frame_budget})")
+                    break
             # Flush any frames still waiting in the SMOOTH playback buffer so
             # the run's final moments are actually shown before closing.
             if not aborted and self.ui is not None and hasattr(self.ui, 'drain'):

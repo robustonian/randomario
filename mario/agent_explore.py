@@ -88,6 +88,10 @@ class GoExploreAgent:
         self.best_overall_path: List[int] = []
         self.episode = 0
         self.first_clear_episode: Optional[int] = None
+        # Fair-benchmark bookkeeping (see benchmark.py)
+        self.deaths = 0
+        self.clear_stats: Optional[dict] = None
+        self._run_t0: Optional[float] = None
 
         self.mode = 'replay'
         self.current_plan: List[int] = []
@@ -220,7 +224,13 @@ class GoExploreAgent:
         self.last_info = info
         self.ep_max_x = int(info.get('x_pos', 0))
 
-    def run(self, max_episodes: int = 1000) -> dict:
+    @property
+    def total_emulator_frames(self) -> int:
+        return self.session.frames_emulated
+
+    def run(self, max_episodes: int = 1000, frame_budget: Optional[int] = None,
+            stop_on_clear: bool = False) -> dict:
+        self._run_t0 = time.time()
         self._start_episode()
         running = True
         while running and self.episode <= max_episodes:
@@ -260,11 +270,22 @@ class GoExploreAgent:
                     if self.first_clear_episode is None:
                         self.first_clear_episode = self.episode
                         self.log(f"[MILESTONE] First clear at episode {self.episode}!")
+                    if self.clear_stats is None:
+                        self.clear_stats = {
+                            'clear_ep': self.episode,
+                            'real_frames': self.session.frames_emulated,
+                            'rollout_frames': 0,
+                            'total_frames': self.total_emulator_frames,
+                            'wall_sec': time.time() - self._run_t0,
+                            'deaths': self.deaths,
+                            'validated': None,  # checked by the benchmark
+                        }
                     self.save_archive()
                 elif int(info.get('time', 400)) <= 1:
                     reason = 'TIME UP'
                 else:
                     reason = 'DEAD'
+                    self.deaths += 1
             elif len(self.prev_x_deque) == self.prev_x_deque.maxlen \
                     and max(self.prev_x_deque) - min(self.prev_x_deque) < 2:
                 reason = 'STUCK'
@@ -286,6 +307,12 @@ class GoExploreAgent:
                 if reason == 'STAGE CLEAR' and self.ui is not None \
                         and hasattr(self.ui, 'celebrate'):
                     self.ui.celebrate(self)
+                if reason == 'STAGE CLEAR' and stop_on_clear:
+                    break
+                if frame_budget is not None and self.session.frames_emulated >= frame_budget:
+                    self.log(f"[EP] frame budget exhausted "
+                             f"({self.session.frames_emulated}/{frame_budget})")
+                    break
                 if self.episode % self.save_every_episodes == 0:
                     self.save_archive()
                 self._start_episode()

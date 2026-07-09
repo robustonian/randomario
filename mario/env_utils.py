@@ -63,6 +63,9 @@ class MarioSession:
         # Pre-resolved controller bytes for the fast rollout path.
         self.action_bytes = [self.env._action_map[i] for i in range(len(actions))]
         self._saved_mirrors = None
+        # Every emulated frame this session ever ran (real steps AND rollout
+        # steps) — the honest "compute spent" unit for fair benchmarking.
+        self.frames_emulated = 0
 
     # ------------------------------------------------------------------ reset
 
@@ -89,6 +92,7 @@ class MarioSession:
     def step(self, action_idx: int):
         """Regular gym step (dying shortcut, area skips, info dict)."""
         obs, reward, done, info = self.env.step(action_idx)
+        self.frames_emulated += 1
         return obs, reward, done, info
 
     # -------------------------------------------------------------- snapshots
@@ -108,6 +112,7 @@ class MarioSession:
     def rollout_step(self, action_idx: int) -> RolloutState:
         smb = self.smb
         smb._frame_advance(self.action_bytes[action_idx])
+        self.frames_emulated += 1
         ram = smb.ram
         player_state = ram[0x000e]
         y_viewport = ram[0x00b5]

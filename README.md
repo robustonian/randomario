@@ -97,6 +97,20 @@ uv run verify.py --stages 8-1 7-4 --episodes 60
 python3 progress_viewer.py           # 標準ライブラリのみで動作
 ```
 
+### 公平ベンチマーク(fresh条件・同一フレーム予算)
+
+EP数比較はプランナーに有利すぎる(1エピソード内で大量のロールアウトを回すため)ので、
+**両エージェントを空の学習状態から同一のエミュレータフレーム予算で走らせ、
+成功率 × 総エミュレータフレーム(実プレイ+シャドウ+ロールアウト+検証まで全部込み)× wall-clock × 実死亡数**で比較します。
+
+```bash
+uv run benchmark.py --stages 1-1 1-4 2-2 2-1 --reps 3 --budget 3000000
+uv run bench_server.py               # Webダッシュボード → http://localhost:8765
+```
+
+ダッシュボードは自動更新され、指標切替(総フレーム/実フレーム/wall/実死亡/クリアEP)、
+fresh/cumulative フィルタ、ステージ別中央値テーブル、生データを表示します。
+
 ## 実行中の操作
 
 | キー | 動作 |

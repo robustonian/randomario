@@ -77,6 +77,8 @@ class PlannerMemory:
         cols = {r[1] for r in self.db.execute("PRAGMA table_info(episodes)")}
         if 'actions' not in cols:
             self.db.execute("ALTER TABLE episodes ADD COLUMN actions BLOB")
+        if 'rollout_frames' not in cols:
+            self.db.execute("ALTER TABLE episodes ADD COLUMN rollout_frames INTEGER")
         self.db.commit()
         self._hazard_cache: Dict[str, List[dict]] = {}
         self._blacklist_cache: Dict[str, set] = {}
@@ -133,13 +135,15 @@ class PlannerMemory:
 
     def record_episode(self, stage: str, run_id: str, ep: int, result: str, cause: str,
                        max_x: int, frames: int, game_time_left: int, wall_sec: float,
-                       actions: Optional[List[int]] = None):
+                       actions: Optional[List[int]] = None,
+                       rollout_frames: Optional[int] = None):
         blob = bytes(actions) if actions else None
         self.db.execute(
             "INSERT INTO episodes(stage, run_id, ep, result, cause, max_x, frames,"
-            " game_time_left, wall_sec, created, actions) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            " game_time_left, wall_sec, created, actions, rollout_frames)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (stage, run_id, ep, result, cause, max_x, frames, game_time_left,
-             wall_sec, time.time(), blob))
+             wall_sec, time.time(), blob, rollout_frames))
         if result == 'clear':
             self.db.execute(
                 "INSERT INTO clears(stage, run_id, ep, frames, wall_sec, game_time_left, created)"
